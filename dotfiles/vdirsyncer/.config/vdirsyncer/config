@@ -1,0 +1,48 @@
+# dotline — vdirsyncer: CalDAV/VTODO sync, opt-in (--with-calendar), see
+# docs/calendar.md. This file is a TEMPLATE: the placeholders below
+# (<CALDAV_URL>, <USERNAME>, <PASSWORD>) need your actual account before
+# `vdirsyncer sync` does anything — they can't be filled in blind, this
+# repo doesn't have your calendar server's address or credentials.
+#
+# Syntax confirmed from vdirsyncer's own docs (vdirsyncer.pimutils.org/
+# en/stable/config.html), not guessed: general/status_path is mandatory,
+# "filesystem" (not "singlefile") is the storage type khal/todoman
+# actually read (vdir format — one .ics per event, see "The Vdir Storage
+# Format" in vdirsyncer's own docs), and `collections = ["from a", "from b"]`
+# is the real syntax for "auto-discover whatever collections exist".
+
+[general]
+status_path = "~/.local/state/dotline/vdirsyncer/status/"
+
+[pair calendar]
+a = "calendar_local"
+b = "calendar_remote"
+collections = ["from a", "from b"]
+
+[storage calendar_local]
+type = "filesystem"
+path = "~/.calendars/"
+fileext = ".ics"
+
+[storage calendar_remote]
+type = "caldav"
+url = "<CALDAV_URL>"
+username = "<USERNAME>"
+password.fetch = ["command", "secret-tool", "lookup", "dotline-calendar", "caldav"]
+
+[pair tasks]
+a = "tasks_local"
+b = "tasks_remote"
+collections = ["from a", "from b"]
+
+[storage tasks_local]
+type = "filesystem"
+path = "~/.tasks/"
+fileext = ".ics"
+
+[storage tasks_remote]
+type = "caldav"
+url = "<CALDAV_URL>"
+username = "<USERNAME>"
+password.fetch = ["command", "secret-tool", "lookup", "dotline-calendar", "caldav"]
+item_types = ["VTODO"]

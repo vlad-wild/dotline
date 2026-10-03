@@ -1,0 +1,34 @@
+%YAML 1.3
+# dotline — MX Master 4 gestures, bound to niri actions.
+#
+# Verified against the real Solaar rules docs (pwr-solaar.github.io/Solaar/
+# rules): each document is a flat [condition, action, ...] list between
+# `---`/`...`, not wrapped in a "Rule:" key.
+#
+# ONE-TIME MANUAL STEP THIS FILE CANNOT DO: the gesture button (and any
+# other button used below) has to be set to "Diverted" first, in Solaar's
+# own GUI (device → Key/Button Diversion) or `solaar config`. That state
+# lives in Solaar's own ~/.config/solaar/config.yaml, in a per-device,
+# firmware-dependent format the docs don't fully spell out — writing it
+# by hand without the actual mouse to check against risked silently
+# getting it wrong, so this is a manual step instead. See docs/mouse.md.
+---
+- Key: [Gesture Button, pressed]
+- MouseGesture: Mouse Up
+- Execute: [niri, msg, action, toggle-overview]
+...
+---
+- Key: [Gesture Button, pressed]
+- MouseGesture: Mouse Down
+- Execute: [qs, -c, dotline, ipc, call, launcher, toggle]
+...
+---
+- Key: [Gesture Button, pressed]
+- MouseGesture: Mouse Left
+- Execute: [niri, msg, action, focus-workspace-up]
+...
+---
+- Key: [Gesture Button, pressed]
+- MouseGesture: Mouse Right
+- Execute: [niri, msg, action, focus-workspace-down]
+...

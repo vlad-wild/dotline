@@ -1,0 +1,15 @@
+// Placeholder — overwritten by scripts/palette-post on the first
+// `dotline-wallpaper set`. A fragment meant to sit inside config.kdl's own
+// `layout { }` block (see include "colors.kdl" there), not a standalone
+// config: it must NOT define its own `layout { }` wrapper.
+focus-ring {
+    off
+}
+border {
+    width 2
+    active-color "#d71921"
+    inactive-color "#3a3a3d"
+}
+insert-hint {
+    color "#d71921"
+}

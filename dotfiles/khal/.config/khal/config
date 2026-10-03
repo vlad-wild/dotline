@@ -1,0 +1,21 @@
+# dotline — khal reads the same vdir directory vdirsyncer syncs into
+# (dotfiles/vdirsyncer/.config/vdirsyncer/config). Adjust <TIMEZONE> (e.g.
+# Europe/Moscow) — khal needs this explicitly, it doesn't read it from the
+# system.
+
+[calendars]
+[[calendar]]
+path = ~/.calendars/*
+type = discover
+
+[locale]
+local_timezone = <TIMEZONE>
+default_timezone = <TIMEZONE>
+timeformat = %H:%M
+dateformat = %d.%m.%Y
+longdateformat = %d.%m.%Y %Y
+datetimeformat = %d.%m.%Y %H:%M
+longdatetimeformat = %d.%m.%Y %H:%M %Y
+
+[default]
+highlight_event_days = True

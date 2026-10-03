@@ -1,0 +1,73 @@
+# dotline — starship prompt.
+#
+# Static, unlike kitty/GTK/niri: starship's own theming isn't wired to
+# scripts/palette-post (see the plan's "осознанно отложено" note). Kept
+# close to monochrome with the same single red accent used everywhere else.
+
+format = """
+$username$hostname$directory$git_branch$git_status
+$character"""
+
+add_newline = true
+
+[character]
+success_symbol = "[❯](bold #d71921)"
+error_symbol = "[❯](bold #6b6b6f)"
+vimcmd_symbol = "[❮](bold #d71921)"
+
+[directory]
+style = "bold #f2f2f0"
+truncation_length = 4
+truncate_to_repo = true
+read_only = " ●"
+read_only_style = "#d71921"
+
+[git_branch]
+symbol = " "
+style = "#bdbdbd"
+format = "[$symbol$branch]($style) "
+
+[git_status]
+style = "#d71921"
+format = "([$all_status$ahead_behind]($style)) "
+conflicted = "="
+ahead = "⇡${count}"
+behind = "⇣${count}"
+diverged = "⇕"
+untracked = "?"
+modified = "!"
+staged = "+"
+renamed = "»"
+deleted = "✘"
+
+[cmd_duration]
+min_time = 4000
+style = "#6b6b6f"
+format = "took [$duration]($style) "
+
+[username]
+style_user = "#bdbdbd"
+style_root = "#d71921"
+format = "[$user]($style)@"
+# no `disabled` here: starship's own default is to show this only over
+# SSH or as root, which is what we want.
+
+[hostname]
+ssh_only = true
+style = "#bdbdbd"
+format = "[$hostname]($style) "
+
+[package]
+disabled = true
+
+[nodejs]
+symbol = " "
+[rust]
+symbol = " "
+[python]
+symbol = " "
+[docker_context]
+symbol = " "
+
+[line_break]
+disabled = false
