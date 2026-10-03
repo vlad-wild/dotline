@@ -186,7 +186,14 @@ enable_multilib() {
 }
 
 ensure_paru() {
-    command -v paru >/dev/null && return 0
+    # `command -v paru` only checks that *some* file is on PATH, not that
+    # it actually runs — a stale paru-bin left over from before this was
+    # switched to a source build (see below) still "exists" while
+    # crashing on startup (cannot open shared object file: libalpm.soN).
+    # `paru --version` catches that: it fails the same way the real
+    # command would, so a broken binary correctly falls through to the
+    # reinstall below instead of being silently accepted.
+    command -v paru >/dev/null && paru --version >/dev/null 2>&1 && return 0
     step "Ставлю paru (AUR-помощник)"
     sudo_run pacman -S --needed --noconfirm base-devel git
     local dir
