@@ -191,13 +191,20 @@ ensure_paru() {
     sudo_run pacman -S --needed --noconfirm base-devel git
     local dir
     dir="$(mktemp -d)"
-    run git clone --depth 1 https://aur.archlinux.org/paru-bin.git "$dir/paru-bin"
+    # Built from source (not paru-bin): a prebuilt binary is linked
+    # against whatever libalpm.so the AUR maintainer's machine had at
+    # build time — on a fresh pacstrap with a different Arch snapshot
+    # that can mismatch the real libalpm here and crash paru outright
+    # ("cannot open shared object file: libalpm.soN") before it even
+    # gets to run. Building from source links against the libalpm
+    # actually installed on this machine, so it can't go stale this way.
+    run git clone --depth 1 https://aur.archlinux.org/paru.git "$dir/paru"
     if ((DRY_RUN)); then
         run makepkg -si --noconfirm
     else
-        (cd "$dir/paru-bin" && makepkg -si --noconfirm)
+        (cd "$dir/paru" && makepkg -si --noconfirm)
     fi
-    manifest_append packages '"paru-bin"'
+    manifest_append packages '"paru"'
 }
 
 # Names (of those given) that exist in the AUR, from its RPC API.
