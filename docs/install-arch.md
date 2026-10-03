@@ -223,8 +223,17 @@ reboot
    sbctl status                 # Setup Mode должен быть Enabled (в BIOS: Secure Boot → Clear keys / Setup mode)
    sudo sbctl create-keys
    sudo sbctl enroll-keys -m    # -m — оставить ключи Microsoft
-   sudo sbctl sign-all -g       # UKI и systemd-boot; хук пакета будет подписывать при обновлениях
+   sudo sbctl sign-all -g       # systemd-boot и всё, что sbctl видит сам — но это только ESP (/efi)!
    ```
+   ⚠ **Если UKI лежат на XBOOTLDR** (раздел 6.3 этой доки кладёт их в `/boot/EFI/Linux/`, а не в `/efi/EFI/Linux/`) — `sbctl sign-all`/`sbctl verify` по умолчанию видят только ESP (подтверждено по `sbctl.conf(5)`: `verify` «looks for EFI binaries … in the ESP partition») и **не найдут и не подпишут** эти файлы сами. Подпишите их явно (`-s` — подписать и запомнить путь, чтобы `sign-all` на будущих обновлениях ядра тоже их подхватывал):
+   ```bash
+   sudo sbctl sign -s /boot/EFI/Linux/arch-linux.efi
+   sudo sbctl sign -s /boot/EFI/Linux/arch-linux-fallback.efi
+   sudo sbctl sign -s /boot/EFI/Linux/arch-linux-lts.efi
+   sudo sbctl sign -s /boot/EFI/Linux/arch-linux-lts-fallback.efi
+   sudo sbctl verify
+   ```
+   Без этого шага включение Secure Boot в BIOS откажется грузить неподписанные UKI (проверено на реальной установке — ровно так и было).
    В BIOS: **Secure Boot → Enabled**. На этом ноутбуке защита и так была выключена (раздел 1, пункт 1) — включать обратно нечего. Если вы ставили систему на машине, где протекторы действительно были и вы их приостанавливали (`-disable ... -RebootCount 3`), после входа в Windows включите защиту обратно: `manage-bde -protectors -enable C:`.
 2. **Разблокировка диска по TPM** (по желанию, чтобы не вводить пароль LUKS каждый раз):
    ```bash
