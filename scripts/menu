@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# dotline-menu: pick one line from stdin, print the choice to stdout.
+# Not a Quickshell IPC call like the rest of scripts/ — this is meant to be
+# piped into/out of (`printf '%s\n' a b c | dotline-menu --dmenu`), the same
+# shape as dmenu/rofi --dmenu, so it composes with any script that needs to
+# ask the user to pick one of several things (VPN profile, monitor layout,
+# audio output, ...). fuzzel is already installed and already themed to the
+# wallpaper palette (dotfiles/fuzzel) — this is just naming that pipeline so
+# other scripts don't have to know it's fuzzel underneath.
+#
+# Usage: dotline-menu --dmenu [fuzzel-options...]
+set -Eeuo pipefail
+exec fuzzel --dmenu "$@"

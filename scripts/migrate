@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# dotline-migrate: bring data over from the Windows side of the dual boot
+# (see MIGRATION.md). Built on lib/common.sh for the same --dry-run/--yes/
+# logging/confirm behaviour as install.sh and friends.
+#
+#   dotline-migrate mount [/dev/device]   mount Windows read-only (auto-detects
+#                                          BitLocker vs. plain NTFS — see mount())
+#   dotline-migrate status                sizes, what's mounted
+#   dotline-migrate data [--only=NAME,…]  rsync Desktop/Documents/dev/… (MIGRATION.md §3)
+#   dotline-migrate games                 native game saves (MIGRATION.md §4)
+#   dotline-migrate wifi <folder> [--apply]   import netsh wlan exports
+#   dotline-migrate unmount               close everything back up
+#
+# The Windows partition is never mounted read-write — see mount() below.
+#
+# mount() tries a BitLocker partition first (`blkid -t TYPE=BitLocker`),
+# then falls back to the largest plain-NTFS partition ≥20 GiB: some
+# machines show as "encrypted" in `manage-bde -status` but with
+# "Protection off" and no key protectors at all — nothing to unlock, a
+# plain read-only NTFS mount works. Pass a device explicitly to skip
+# auto-detection either way.
+
+set -Eeuo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source lib/common.sh
+
+MAPPER_NAME="dotline-migrate-win"
+MOUNT_POINT="/mnt/windows"
+WIN_USER="${WIN_USER:-$USER}"
+
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+win_root() { echo "$MOUNT_POINT/Users/$WIN_USER"; }
+
+# ---------- mount / unmount ----------
+
+find_bitlocker_device() {
+    blkid -t TYPE=BitLocker -o device 2>/dev/null
+}
+
+# Plain (unencrypted, or BitLocker with protection off and no protectors —
+# `manage-bde -status` on this machine showed exactly that: "Encrypted
+# 100%" but "Protection off" and no key protectors, which in practice
+# means there's nothing to unlock) NTFS partitions, largest first. Filters
+# out anything under 20 GiB so the small WinRE recovery partition (also
+# NTFS, ~0.8 GB here) doesn't get confused with the real C: data partition.
+find_ntfs_candidates() {
+    local dev size_bytes min_bytes=$((20 * 1024 * 1024 * 1024))
+    local -a sized=()
+    while read -r dev; do
+        [[ -n "$dev" ]] || continue
+        size_bytes="$(lsblk -b -d -no SIZE "$dev" 2>/dev/null)"
+        [[ "${size_bytes:-0}" -ge "$min_bytes" ]] && sized+=("$size_bytes $dev")
+    done < <(blkid -t TYPE=ntfs -o device 2>/dev/null)
+    printf '%s\n' "${sized[@]}" | sort -rn | awk '{print $2}'
+}
+
+mount_windows() {
+    step "Открываю раздел Windows"
+    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+        note "$MOUNT_POINT уже примонтирован."
+        return 0
+    fi
+    local dev="${1:-}" via_bitlocker=0
+    if [[ -z "$dev" ]]; then
+        local -a found=()
+        mapfile -t found < <(find_bitlocker_device)
+        case "${#found[@]}" in
+            1) dev="${found[0]}"; via_bitlocker=1 ;;
+            0)
+                # No active BitLocker protector found — try a plain NTFS
+                # mount instead of assuming a recovery key is needed.
+                mapfile -t found < <(find_ntfs_candidates)
+                case "${#found[@]}" in
+                    0) die "Не нашёл ни BitLocker, ни NTFS-раздел ≥20 ГиБ. Укажите вручную: dotline-migrate mount /dev/sdXN" ;;
+                    1) dev="${found[0]}" ;;
+                    *)
+                        warn "Нашёл несколько подходящих NTFS-разделов:"
+                        printf '    %s\n' "${found[@]}"
+                        die "Укажите нужный явно: dotline-migrate mount /dev/sdXN"
+                        ;;
+                esac
+                ;;
+            *)
+                warn "Нашёл несколько BitLocker-разделов:"
+                printf '    %s\n' "${found[@]}"
+                die "Укажите нужный явно: dotline-migrate mount /dev/sdXN"
+                ;;
+        esac
+    elif blkid -p -o value -s TYPE "$dev" 2>/dev/null | grep -qx BitLocker; then
+        via_bitlocker=1
+    fi
+
+    info "Раздел: $dev"
+    if ((via_bitlocker)); then
+        confirm "Открыть $dev как BitLocker (попросит ключ восстановления) и примонтировать в $MOUNT_POINT только для чтения?" ||
+            die "Отменено."
+        sudo_run cryptsetup open --type bitlk "$dev" "$MAPPER_NAME"
+        dev="/dev/mapper/$MAPPER_NAME"
+    else
+        confirm "Примонтировать $dev в $MOUNT_POINT только для чтения (без BitLocker — защита выключена или раздел не шифровался)?" ||
+            die "Отменено."
+    fi
+
+    sudo_run mkdir -p "$MOUNT_POINT"
+    # ntfs3 (in-kernel, since Linux 5.15) first; ntfs-3g (FUSE) as a
+    # fallback for older kernels or if ntfs3 isn't built in.
+    if ! sudo_run mount -t ntfs3 -o ro "$dev" "$MOUNT_POINT" 2>/dev/null; then
+        sudo_run mount -t ntfs-3g -o ro "$dev" "$MOUNT_POINT"
+    fi
+    info "Примонтировано (только чтение): $MOUNT_POINT"
+}
+
+unmount_windows() {
+    step "Закрываю раздел Windows"
+    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+        sudo_run umount "$MOUNT_POINT"
+    else
+        note "$MOUNT_POINT не примонтирован."
+    fi
+    if [[ -e "/dev/mapper/$MAPPER_NAME" ]]; then
+        sudo_run cryptsetup close "$MAPPER_NAME"
+    fi
+    info "Готово."
+}
+
+require_mounted() {
+    mountpoint -q "$MOUNT_POINT" 2>/dev/null || die "Сначала: dotline-migrate mount"
+    [[ -d "$(win_root)" ]] || die "Нет $(win_root) — тот ли это раздел, тот ли WIN_USER=$WIN_USER?"
+}
+
+status() {
+    step "Статус"
+    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+        info "Примонтировано: $MOUNT_POINT"
+        info "Пользователь Windows: $WIN_USER ($(win_root))"
+        local d src
+        for d in Desktop Documents Pictures Videos Music Downloads dev; do
+            src="$(win_root)/$d"
+            [[ -d "$src" ]] && info "  $d: $(du -sh "$src" 2>/dev/null | cut -f1)"
+        done
+    else
+        note "Ничего не примонтировано (dotline-migrate mount)."
+    fi
+}
+
+# ---------- data (MIGRATION.md §3) ----------
+
+# name:windows-subpath:linux-dest, dest relative to $HOME unless it starts with /
+DATA_MAP=(
+    "Desktop:Desktop:Desktop"
+    "Documents:Documents:Documents"
+    "Pictures:Pictures:Pictures"
+    "Videos:Videos:Videos"
+    "Music:Music:Music"
+    "Downloads:Downloads:Downloads"
+    "dev:dev:dev"
+    "ssh:.ssh:.ssh"
+)
+
+sync_one() {
+    local name="$1" sub="$2" dest="$3" src
+    src="$(win_root)/$sub"
+    [[ -d "$src" ]] || { warn "Нет $src — пропускаю $name."; return 0; }
+    [[ "$dest" == /* ]] || dest="$HOME/$dest"
+    step "$name → $dest"
+    run mkdir -p "$dest"
+    run rsync -aHAX --info=progress2 "$src/" "$dest/"
+}
+
+data() {
+    require_mounted
+    local only="${1:-}"
+    local entry name sub dest
+    for entry in "${DATA_MAP[@]}"; do
+        IFS=: read -r name sub dest <<<"$entry"
+        if [[ -n "$only" ]] && [[ ",$only," != *",$name,"* ]]; then continue; fi
+        sync_one "$name" "$sub" "$dest"
+    done
+    if [[ -z "$only" || ",$only," == *",ssh,"* ]]; then
+        [[ -d "$HOME/.ssh" ]] && { run chmod 700 "$HOME/.ssh"; run chmod 600 "$HOME"/.ssh/id_* "$HOME/.ssh/config" 2>/dev/null || true; }
+    fi
+    note "Дальше вручную (см. MIGRATION.md §3): git config core.autocrlf input в репозиториях ~/dev, пересборка target/ и node_modules/, WSL-экспорт отдельно (wsl --export, ещё в Windows)."
+}
+
+# ---------- games (MIGRATION.md §4, native saves only — Proton saves live ----------
+# ---------- inside steamapps/compatdata/<appid>, too install-specific to guess) ----
+
+GAME_MAP=(
+    "Factorio:AppData/Roaming/Factorio:.factorio"
+    "RimWorld:AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios:.config/unity3d/Ludeon Studios/RimWorld by Ludeon Studios"
+    "Oxygen Not Included:Documents/Klei/OxygenNotIncluded:.config/unity3d/Klei/Oxygen Not Included"
+    "Stellaris:Documents/Paradox Interactive/Stellaris:.local/share/Paradox Interactive/Stellaris"
+    "Modrinth App:AppData/Roaming/ModrinthApp:.local/share/ModrinthApp"
+)
+
+games() {
+    require_mounted
+    local entry name sub dest src
+    for entry in "${GAME_MAP[@]}"; do
+        IFS=: read -r name sub dest <<<"$entry"
+        src="$(win_root)/$sub"
+        if [[ -d "$src" ]]; then
+            step "$name"
+            run mkdir -p "$HOME/$dest"
+            run rsync -a --info=progress2 "$src/" "$HOME/$dest/"
+        fi
+    done
+    note "Proton-игры (Kenshi и другие) и Dwarf Fortress — сохранения внутри конкретной установки, смотрите MIGRATION.md §4 руками."
+    note "После первого запуска каждой игры в Linux проверьте, что сохранения видны, и только потом удаляйте их в Windows."
+}
+
+# ---------- wifi ----------
+
+wifi() {
+    local dir="${1:?Укажите папку с экспортом: dotline-migrate wifi <folder> [--apply]}"
+    shift || true
+    run python3 "$RICE_ROOT/scripts/import-wifi-profiles" "$dir" "$@"
+}
+
+main() {
+    parse_common_args "$@"
+    local cmd="${OPTIONS[0]:-}"
+    case "$cmd" in
+        mount) mount_windows "${OPTIONS[1]:-}" ;;
+        unmount) unmount_windows ;;
+        status) status ;;
+        data) data "${OPTIONS[1]:-}" ;;
+        games) games ;;
+        wifi) wifi "${OPTIONS[@]:1}" ;;
+        "" | -h | --help) usage ;;
+        *) die "Неизвестная команда: $cmd (см. dotline-migrate --help)" ;;
+    esac
+}
+
+main "$@"

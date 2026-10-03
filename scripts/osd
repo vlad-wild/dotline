@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# dotline-osd: change volume/brightness and show the on-screen dot level
+# for it (see dotfiles/quickshell/dotline/osd/Osd.qml). Bound to the
+# XF86 media keys in dotfiles/niri/config.kdl, in place of calling
+# wpctl/brightnessctl directly from niri — this does that AND notifies
+# Quickshell, niri's own bind can only do the former.
+#
+#   dotline-osd volume up|down|mute
+#   dotline-osd brightness up|down
+#
+# The `qs ipc call` notify is fire-and-forget and never fails the actual
+# volume/brightness change: if Quickshell isn't running, you just don't
+# get the on-screen popup.
+
+set -Eeuo pipefail
+
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+notify() {
+    # kind: volume|brightness, percent: 0-100 integer, muted: 0|1
+    qs -c dotline ipc call osd show "$1" "$2" "${3:-0}" >/dev/null 2>&1 || true
+}
+
+volume_percent() {
+    wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null |
+        sed -n 's/.*Volume:[[:space:]]*\([0-9.]\+\).*/\1/p' |
+        awk '{printf "%d", $1 * 100}'
+}
+volume_muted() {
+    wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep -q MUTED && echo 1 || echo 0
+}
+
+brightness_percent() {
+    brightnessctl -m | awk -F, '{gsub("%","",$4); print $4}'
+}
+
+case "${1:-}" in
+    volume)
+        case "${2:-}" in
+            up) wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ ;;
+            down) wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- ;;
+            mute) wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle ;;
+            *) usage ;;
+        esac
+        notify volume "$(volume_percent)" "$(volume_muted)"
+        ;;
+    brightness)
+        case "${2:-}" in
+            up) brightnessctl set 5%+ >/dev/null ;;
+            down) brightnessctl set 5%- >/dev/null ;;
+            *) usage ;;
+        esac
+        notify brightness "$(brightness_percent)"
+        ;;
+    "" | -h | --help) usage ;;
+    *) echo "dotline-osd: неизвестная команда: $1" >&2; exit 1 ;;
+esac

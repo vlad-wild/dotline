@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""dotline-app: search and install packages across pacman, AUR and Flathub.
+
+    dotline-app search <query>            JSON array of results on stdout
+    dotline-app install <source> <id>     visible install (meant to run inside kitty)
+    dotline-app remove  <source> <id>     visible removal (meant to run inside kitty)
+
+source: pacman | aur | flatpak. `paru -S` resolves both pacman and AUR
+packages through one command, so install/remove treat them the same way;
+flatpak needs its own CLI.
+
+search() never syncs any database itself (checkupdates/paru already do
+that on their own schedule, see scripts/update-check) — a stale local
+pacman db just means a slightly outdated description in results, not a
+wrong install, since `paru -S` always resolves the real current package
+regardless of what `-Ss` found. The AUR RPC call needs the network;
+failure there (offline, AUR down) degrades to "no AUR results" rather
+than erroring the whole search — same reasoning as search_flatpak()
+degrading to [] when flatpak isn't installed at all.
+
+AUR RPC v5 endpoint and field names (Name/Description) confirmed from
+aurweb's own doc/rpc.txt and the Jguer/aur Go client's Pkg struct, not
+guessed — the query-string form (`/rpc/?v=5&type=search&by=name-desc&
+arg=...`) rather than the path form, both documented, this one simpler
+to build with urlencode.
+"""
+import json
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+AUR_RPC = "https://aur.archlinux.org/rpc/"
+MAX_RESULTS = 20
+
+
+def run_lines(cmd):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    return out.stdout.splitlines() if out.returncode == 0 else []
+
+
+def search_pacman(query):
+    # `pacman -Ss <query>`: two lines per match —
+    #   repo/name version [installed]
+    #       Description text.
+    results = []
+    lines = run_lines(["pacman", "-Ss", "--", query])
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\S+)/(\S+)\s+(\S+)", lines[i])
+        if not m:
+            i += 1
+            continue
+        desc = ""
+        if i + 1 < len(lines) and lines[i + 1].startswith(" "):
+            desc = lines[i + 1].strip()
+            i += 1
+        results.append({"source": "pacman", "id": m.group(2), "name": m.group(2), "description": desc})
+        i += 1
+    return results[:MAX_RESULTS]
+
+
+def search_aur(query):
+    if not query:
+        return []
+    url = AUR_RPC + "?" + urllib.parse.urlencode({"v": "5", "type": "search", "by": "name-desc", "arg": query})
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.load(r)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return []
+    out = []
+    for pkg in data.get("results", [])[:MAX_RESULTS]:
+        name = pkg.get("Name", "")
+        if not name:
+            continue
+        out.append({"source": "aur", "id": name, "name": name, "description": pkg.get("Description") or ""})
+    return out
+
+
+def search_flatpak(query):
+    if not shutil.which("flatpak"):
+        return []
+    lines = run_lines(["flatpak", "search", "--columns=application,name,description", "--", query])
+    out = []
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 2 or parts[0] in ("", "No matches found"):
+            continue
+        out.append({
+            "source": "flatpak",
+            "id": parts[0],
+            "name": parts[1],
+            "description": parts[2] if len(parts) > 2 else "",
+        })
+    return out[:MAX_RESULTS]
+
+
+def cmd_search(query):
+    print(json.dumps(search_pacman(query) + search_aur(query) + search_flatpak(query), ensure_ascii=False))
+
+
+def cmd_install(source, pkg_id):
+    if source in ("pacman", "aur"):
+        subprocess.run(["paru", "-S", "--needed", "--", pkg_id], check=False)
+    elif source == "flatpak":
+        subprocess.run(["flatpak", "install", "-y", "flathub", "--", pkg_id], check=False)
+    else:
+        sys.exit(f"Неизвестный источник: {source}")
+
+
+def cmd_remove(source, pkg_id):
+    if source in ("pacman", "aur"):
+        subprocess.run(["sudo", "pacman", "-Rns", "--", pkg_id], check=False)
+    elif source == "flatpak":
+        subprocess.run(["flatpak", "uninstall", "-y", "--", pkg_id], check=False)
+    else:
+        sys.exit(f"Неизвестный источник: {source}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    cmd, rest = args[0], args[1:]
+    if cmd == "search":
+        cmd_search(rest[0] if rest else "")
+    elif cmd == "install":
+        if len(rest) < 2:
+            sys.exit("dotline-app install <source> <id>")
+        cmd_install(rest[0], rest[1])
+    elif cmd == "remove":
+        if len(rest) < 2:
+            sys.exit("dotline-app remove <source> <id>")
+        cmd_remove(rest[0], rest[1])
+    else:
+        sys.exit(f"Неизвестная команда: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

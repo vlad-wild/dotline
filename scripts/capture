@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# dotline-capture: OCR and QR scanning from a selected screen region.
+#
+#   dotline-capture ocr   select a region, OCR it (rus+eng), copy to clipboard
+#   dotline-capture qr    select a region, decode a QR code in it: a URL is
+#                         opened (xdg-open) and copied; anything else is
+#                         copied and then scrubbed from cliphist's history
+#                         (best-effort — see qr() below for why it can't be
+#                         a hard guarantee)
+#
+# Same grim+slurp pipe shape as config.kdl's existing Print bind
+# (`grim -g "$(slurp)" - | wl-copy`) — no temp files, both tesseract and
+# zbarimg accept "-" for stdin.
+
+set -Eeuo pipefail
+
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+toast() { notify-send -a dotline "$1" "${2:-}" 2>/dev/null || true; }
+
+# Region the user selects; empty if they cancelled (Escape).
+select_region() { slurp 2>/dev/null; }
+
+ocr() {
+    local geom text
+    geom="$(select_region)" || true
+    [[ -n "$geom" ]] || { toast "OCR" "Отменено"; return 0; }
+
+    text="$(grim -g "$geom" - | tesseract - - -l rus+eng 2>/dev/null | sed '/^[[:space:]]*$/d')"
+    if [[ -z "$text" ]]; then
+        toast "OCR" "Текст не распознан"
+        return 0
+    fi
+    printf '%s' "$text" | wl-copy
+    toast "Распознано и скопировано" "$(printf '%s\n' "$text" | head -3)"
+}
+
+qr() {
+    local geom payload
+    geom="$(select_region)" || true
+    [[ -n "$geom" ]] || { toast "QR" "Отменено"; return 0; }
+
+    # PNG:- (ImageMagick-style format prefix), not a bare "-": plain stdin
+    # autodetection was only added to zbarimg in a later fix and isn't
+    # guaranteed on every version — PNG:- works everywhere and grim's
+    # stdout output ("-") is always PNG.
+    payload="$(grim -g "$geom" - | zbarimg --raw -q PNG:- 2>/dev/null | head -1)"
+    if [[ -z "$payload" ]]; then
+        toast "QR" "Код не найден"
+        return 0
+    fi
+
+    if [[ "$payload" =~ ^https?:// ]]; then
+        printf '%s' "$payload" | wl-copy
+        toast "QR: ссылка" "$payload"
+        xdg-open "$payload" >/dev/null 2>&1 &
+    else
+        printf '%s' "$payload" | wl-copy
+        # Best-effort scrub, not a real guarantee: cliphist has no
+        # store-time exclusion hint it honours (checked — it doesn't
+        # implement x-kde-passwordManagerHint or any equivalent filter),
+        # so there's a short window where this sits in its database before
+        # delete-query removes it.
+        sleep 0.3
+        command -v cliphist >/dev/null && cliphist delete-query -- "$payload" >/dev/null 2>&1 || true
+        toast "QR: скопировано" "Не сохранено в историю буфера"
+    fi
+}
+
+main() {
+    case "${1:-}" in
+        ocr) ocr ;;
+        qr) qr ;;
+        "" | -h | --help) usage ;;
+        *) echo "Неизвестная команда: $1 (см. dotline-capture --help)" >&2; exit 1 ;;
+    esac
+}
+
+main "$@"

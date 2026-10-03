@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Turn matugen's Material colours into the dotline palette contract.
+
+Runs after `matugen image <wallpaper>` (see scripts/wallpaper and lib/palette.sh).
+Writes ~/.local/state/dotline/palette.json with exactly the fields
+faceauth-ui and Theme.qml already agree on (see faceauth's src/bin/ui/style.rs):
+
+    {"mode": "dark"|"light", "surface": "#rrggbb", "surfaceHigh": "#rrggbb",
+     "on": "#rrggbb", "muted": "#rrggbb", "accent": "#rrggbb", "outline": "#rrggbb"}
+
+Then renders scripts/palette-templates/*.tmpl (plain "@@token@@" placeholders,
+not matugen's own template engine, so this file is the one place the mapping
+lives) into the real config paths for kitty, GTK 3/4 and fuzzel, and writes
+niri's colors.kdl.
+
+Usage:
+    palette-post <image> [--mode auto|dark|light] [--state-dir DIR]
+
+Exit codes: 0 ok, 1 bad usage, 2 matugen failed or gave unreadable JSON.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+DOTLINE_RED = "#d71921"
+MONOCHROME_CHROMA = 0.045       # OKLCH chroma below this: treat wallpaper as colourless
+MIN_ACCENT_CONTRAST = 3.0       # WCAG: large/graphic elements, not body text
+LUMINANCE_LIGHT_THRESHOLD = 0.72  # matches the reasoning used in the browser mock-up
+
+TEMPLATES_DIR = Path(__file__).resolve().parent / "palette-templates"
+
+# Ready-made palettes (plan's "Темы и шрифты" — "готовая палитра"), as an
+# alternative to deriving one from the wallpaper. Hex values sourced from
+# each project's own canonical palette, not invented:
+#   - Catppuccin: github.com/catppuccin/catppuccin's own palette table
+#     (Mocha/Latte).
+#   - Nord: nordtheme.com/docs/colors-and-palettes (nord0/1/5/6/11).
+#   - Gruvbox: morhetz/gruvbox's own gruvbox.vim source (dark0/dark1,
+#     light0/light1, gray_245, bright_red/faded_red) — note gruvbox's
+#     classic bg/fg inversion: "light1" is literally the *foreground*
+#     colour in dark mode, and "dark1" is the foreground in light mode.
+#   - nothing-mono/nothing-light: this rice's own monochrome default
+#     (Theme.qml's built-in fallback) and its light counterpart, not an
+#     external theme — completes the pair instead of leaving light-mode
+#     undefined.
+# "outline" isn't a distinct tone in most of these source palettes; reusing
+# "muted" for it is a deliberate simplification, not a missing lookup.
+PALETTE_PRESETS: dict[str, dict[str, dict[str, str]]] = {
+    "catppuccin": {
+        "dark": {"surface": "#1e1e2e", "surfaceHigh": "#313244", "on": "#cdd6f4",
+                  "muted": "#a6adc8", "accent": "#f38ba8", "outline": "#a6adc8"},
+        "light": {"surface": "#eff1f5", "surfaceHigh": "#ccd0da", "on": "#4c4f69",
+                   "muted": "#6c6f85", "accent": "#d20f39", "outline": "#6c6f85"},
+    },
+    "nord": {
+        "dark": {"surface": "#2e3440", "surfaceHigh": "#3b4252", "on": "#eceff4",
+                  "muted": "#e5e9f0", "accent": "#bf616a", "outline": "#e5e9f0"},
+        "light": {"surface": "#e5e9f0", "surfaceHigh": "#d8dee9", "on": "#2e3440",
+                   "muted": "#4c566a", "accent": "#bf616a", "outline": "#4c566a"},
+    },
+    "gruvbox": {
+        "dark": {"surface": "#282828", "surfaceHigh": "#3c3836", "on": "#ebdbb2",
+                  "muted": "#928374", "accent": "#fb4934", "outline": "#928374"},
+        "light": {"surface": "#fbf1c7", "surfaceHigh": "#ebdbb2", "on": "#3c3836",
+                   "muted": "#928374", "accent": "#9d0006", "outline": "#928374"},
+    },
+    "nothing-mono": {
+        "dark": {"surface": "#1b1b1d", "surfaceHigh": "#2e2e30", "on": "#ffffff",
+                  "muted": "#bdbdbd", "accent": DOTLINE_RED, "outline": "#3a3a3d"},
+        "light": {"surface": "#f5f5f3", "surfaceHigh": "#e8e8e6", "on": "#1a1a1a",
+                   "muted": "#6e6e6e", "accent": DOTLINE_RED, "outline": "#d4d4d2"},
+    },
+}
+PALETTE_PRESETS["nothing-light"] = {"dark": PALETTE_PRESETS["nothing-mono"]["dark"],
+                                     "light": PALETTE_PRESETS["nothing-mono"]["light"]}
+
+# Only presets with a real match in the two ecosystems below get yazi/btop
+# themed too — wallpaper-derived mode never touches either (there's no
+# sensible mapping from an arbitrary extracted accent colour to a premade
+# flavor/theme name, so it's left at the user's own yazi/btop default).
+#   yazi: name exactly as installed via `ya pkg add yazi-rs/flavors:<name>`
+#     (confirmed from yazi's own docs + the yazi-rs/flavors repo listing).
+#   btop: name of a theme already bundled with the btop package itself
+#     (checked against btop's own themes/ directory) — catppuccin/rose-pine
+#     aren't bundled, so there's deliberately no entry for "catppuccin" here.
+PRESET_YAZI_FLAVOR = {
+    "catppuccin": {"dark": "catppuccin-mocha", "light": "catppuccin-latte"},
+    "nord": {"dark": "nord", "light": "nord"},
+    "gruvbox": {"dark": "gruvbox", "light": "gruvbox"},
+}
+PRESET_BTOP_THEME = {
+    "nord": {"dark": "nord", "light": "nord"},
+    "gruvbox": {"dark": "gruvbox_dark", "light": "gruvbox_light"},
+}
+
+# ---------- sRGB <-> OKLab/OKLCH (same formulas as the interactive mock-up) ----------
+
+
+def _to_linear(c: float) -> float:
+    c /= 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _to_gamma(c: float) -> float:
+    c = min(1.0, max(0.0, c))
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.strip().lstrip("#")
+    if len(h) != 6:
+        raise ValueError(f"not a #rrggbb colour: {h!r}")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+
+
+def rgb_to_hex(rgb: tuple[float, float, float]) -> str:
+    return "#" + "".join(f"{round(_to_gamma(c) * 255):02x}" for c in rgb)
+
+
+def rgb_to_oklab(r: int, g: int, b: int) -> tuple[float, float, float]:
+    r, g, b = _to_linear(r), _to_linear(g), _to_linear(b)
+    l = (0.4122214708 * r + 0.5363277080 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+
+
+def oklab_to_lch(l: float, a: float, b: float) -> tuple[float, float, float]:
+    c = math.hypot(a, b)
+    h = math.degrees(math.atan2(b, a))
+    return l, c, h % 360
+
+
+def lch_to_rgb(l: float, c: float, h: float) -> tuple[float, float, float]:
+    a = c * math.cos(math.radians(h))
+    b = c * math.sin(math.radians(h))
+    l_ = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m_ = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s_ = (l - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    return (
+        4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_,
+        -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_,
+        -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_,
+    )
+
+
+def relative_luminance(hexcolor: str) -> float:
+    r, g, b = hex_to_rgb(hexcolor)
+    rl, gl, bl = _to_linear(r), _to_linear(g), _to_linear(b)
+    return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+
+
+def contrast(a: str, b: str) -> float:
+    la, lb = relative_luminance(a), relative_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def chroma_of(hexcolor: str) -> float:
+    l, a, b = rgb_to_oklab(*hex_to_rgb(hexcolor))
+    _, c, _ = oklab_to_lch(l, a, b)
+    return c
+
+
+def nudge_lightness_for_contrast(hexcolor: str, surface: str, dark: bool, min_ratio: float) -> str:
+    """Slide the colour's OKLCH lightness towards readable, keeping its hue/chroma."""
+    l, a, b = rgb_to_oklab(*hex_to_rgb(hexcolor))
+    l, c, h = oklab_to_lch(l, a, b)
+    step = 0.02 if dark else -0.02
+    out = hexcolor
+    for _ in range(25):
+        if contrast(out, surface) >= min_ratio:
+            break
+        l = min(0.97, max(0.03, l + step))
+        out = rgb_to_hex(lch_to_rgb(l, c, h))
+    return out
+
+
+# ---------- matugen ----------
+
+
+def run_matugen(image: Path, mode: str) -> dict:
+    matugen = shutil.which("matugen")
+    if not matugen:
+        die(2, "matugen не найден в PATH — он должен стоять из packages/desktop.txt.")
+    cmd = [matugen, "image", str(image), "--type", "scheme-neutral", "--mode", mode, "--json", "hex"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except OSError as e:
+        die(2, f"Не удалось запустить matugen: {e}\n  команда: {' '.join(cmd)}")
+    if proc.returncode != 0:
+        die(2, f"matugen завершился с ошибкой ({proc.returncode}):\n{proc.stderr}\n  команда: {' '.join(cmd)}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        die(2, f"Не разобрать JSON от matugen ({e}). Возможно, у установленной версии другой формат "
+                f"вывода — проверьте `matugen image --help`.\nПолучено:\n{proc.stdout[:2000]}")
+
+
+def role(colors: dict, mode: str, *names: str) -> str | None:
+    """First matching Material role, trying a few plausible fallback names.
+
+    matugen's exact role set has drifted between versions; this tries the
+    scheme-neutral names this script was written against and falls back
+    gracefully instead of crashing on a slightly different install.
+    """
+    branch = colors.get(mode, colors)
+    for n in names:
+        v = branch.get(n)
+        if isinstance(v, str):
+            return v if v.startswith("#") else f"#{v}"
+    return None
+
+
+# ---------- palette ----------
+
+
+def die(code: int, msg: str) -> None:
+    print(f"palette-post: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def build_palette_from_preset(name: str, mode_arg: str, oled: bool) -> dict:
+    if name not in PALETTE_PRESETS:
+        die(1, f"Неизвестная готовая палитра: {name!r}. Есть: {', '.join(sorted(PALETTE_PRESETS))}")
+    # "auto" has no wallpaper to measure brightness from — a preset's mode
+    # has to be picked explicitly, defaulting to dark.
+    mode = "light" if mode_arg == "light" else "dark"
+    tones = PALETTE_PRESETS[name][mode]
+    surface = "#000000" if (oled and mode == "dark") else tones["surface"]
+    return {
+        "mode": mode,
+        "surface": surface,
+        "surfaceHigh": tones["surfaceHigh"],
+        "on": tones["on"],
+        "muted": tones["muted"],
+        "accent": tones["accent"],
+        "outline": tones["outline"],
+        "_mono": name.startswith("nothing"),
+        "_contrastOn": round(contrast(tones["on"], surface), 2),
+        "_contrastAccent": round(contrast(tones["accent"], surface), 2),
+        "_preset": name,
+    }
+
+
+def build_palette(image: Path, mode_arg: str, oled: bool = False) -> dict:
+    if mode_arg == "auto":
+        mean = image_mean_brightness(image)
+        mode = "light" if mean > LUMINANCE_LIGHT_THRESHOLD else "dark"
+    else:
+        mode = mode_arg
+
+    data = run_matugen(image, mode)
+    colors = data.get("colors", data)  # some versions nest under "colors", some don't
+
+    source = data.get("source_color") or role(colors, mode, "primary")
+    mono = chroma_of(source) < MONOCHROME_CHROMA if source else True
+
+    surface = role(colors, mode, "surface", "background") or ("#1b1b1d" if mode == "dark" else "#f5f5f3")
+    surface_high = role(colors, mode, "surface_container_high", "surface_bright", "surface_variant") or surface
+    on = role(colors, mode, "on_surface", "on_background") or ("#ffffff" if mode == "dark" else "#1a1a1a")
+    muted = role(colors, mode, "on_surface_variant") or on
+    outline = role(colors, mode, "outline", "outline_variant") or muted
+    accent = DOTLINE_RED if mono else (role(colors, mode, "primary") or DOTLINE_RED)
+
+    accent = nudge_lightness_for_contrast(accent, surface, dark=(mode == "dark"), min_ratio=MIN_ACCENT_CONTRAST)
+
+    if oled and mode == "dark":
+        surface = "#000000"
+
+    return {
+        "mode": mode,
+        "surface": surface,
+        "surfaceHigh": surface_high,
+        "on": on,
+        "muted": muted,
+        "accent": accent,
+        "outline": outline,
+        # not part of the faceauth-ui contract; kept for scripts/wallpaper's log line
+        "_mono": mono,
+        "_contrastOn": round(contrast(on, surface), 2),
+        "_contrastAccent": round(contrast(accent, surface), 2),
+    }
+
+
+def image_mean_brightness(image: Path) -> float:
+    for exe in ("magick", "convert"):
+        tool = shutil.which(exe)
+        if not tool:
+            continue
+        args = [tool] + (["-colorspace", "Gray", str(image), "-format", "%[fx:mean]", "info:"]
+                          if exe == "convert" else
+                          [str(image), "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"])
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=20)
+            if out.returncode == 0 and out.stdout.strip():
+                return float(out.stdout.strip())
+        except (OSError, ValueError):
+            continue
+    print("palette-post: imagemagick недоступен — считаю обои тёмными по умолчанию.", file=sys.stderr)
+    return 0.0
+
+
+# ---------- templates ----------
+
+
+def render_templates(palette: dict, state_dir: Path) -> list[Path]:
+    home = Path.home()
+    # gtk.css goes to both gtk-3.0 and gtk-4.0, the rest to a single destination.
+    pairs = [
+        ("kitty.conf.tmpl", [home / ".config/kitty/theme-dotline.conf"]),
+        ("gtk.css.tmpl", [home / ".config/gtk-3.0/gtk.css", home / ".config/gtk-4.0/gtk.css"]),
+        ("fuzzel-colors.ini.tmpl", [home / ".config/fuzzel/dotline-colors.ini"]),
+        ("niri-colors.kdl.tmpl", [home / ".config/niri/colors.kdl"]),
+    ]
+    written: list[Path] = []
+    for tmpl_name, dests in pairs:
+        tmpl_path = TEMPLATES_DIR / tmpl_name
+        if not tmpl_path.is_file():
+            print(f"palette-post: нет шаблона {tmpl_path}, пропускаю.", file=sys.stderr)
+            continue
+        text = tmpl_path.read_text(encoding="utf-8")
+        for key in ("mode", "surface", "surfaceHigh", "on", "muted", "accent", "outline"):
+            text = text.replace(f"@@{key}@@", str(palette[key]))
+        if tmpl_name == "fuzzel-colors.ini.tmpl":
+            # fuzzel wants bare RRGGBBAA, no leading '#' (the template appends
+            # the alpha pair right after each @@token@@, e.g. @@surface@@f0).
+            text = text.replace("#", "")
+        for dest in dests:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text, encoding="utf-8")
+            written.append(dest)
+    return written
+
+
+# Only reached for a named preset (see PRESET_YAZI_FLAVOR/PRESET_BTOP_THEME's
+# own comment for why wallpaper-derived mode never calls this) — points
+# yazi/btop at a flavor/theme they already ship or already have installed,
+# rather than this script trying to author either file format itself.
+def render_preset_extras(preset: str, mode: str) -> list[str]:
+    notes: list[str] = []
+    home = Path.home()
+
+    flavor = PRESET_YAZI_FLAVOR.get(preset, {}).get(mode)
+    if flavor:
+        yazi_theme = home / ".config/yazi/theme.toml"
+        yazi_theme.parent.mkdir(parents=True, exist_ok=True)
+        yazi_theme.write_text(f'[flavor]\ndark = "{flavor}"\nlight = "{flavor}"\n', encoding="utf-8")
+        notes.append(f"yazi: flavor={flavor} (нужно один раз: ya pkg add yazi-rs/flavors:{flavor})")
+
+    btop_theme = PRESET_BTOP_THEME.get(preset, {}).get(mode)
+    if btop_theme:
+        btop_conf = home / ".config/btop/btop.conf"
+        if btop_conf.is_file():
+            text = btop_conf.read_text(encoding="utf-8")
+            new_line = f'color_theme = "{btop_theme}"'
+            if "color_theme" in text:
+                text = re.sub(r'^color_theme\s*=.*$', new_line, text, flags=re.MULTILINE)
+            else:
+                text += f"\n{new_line}\n"
+            btop_conf.write_text(text, encoding="utf-8")
+            notes.append(f"btop: color_theme={btop_theme} (перезапустить btop, чтобы увидеть)")
+        else:
+            notes.append(f"btop: пропущено — нет {btop_conf} (запустите btop хотя бы раз, чтобы он создал конфиг)")
+    return notes
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("image", type=Path, nargs="?",
+                     help="обои; не нужны вместе с --preset")
+    ap.add_argument("--mode", choices=["auto", "dark", "light"], default="auto")
+    ap.add_argument("--preset", choices=sorted(PALETTE_PRESETS),
+                     help="готовая палитра вместо извлечения цвета из обоев (plan's \"готовая палитра\")")
+    ap.add_argument("--oled", action="store_true",
+                     help="чисто чёрный surface в тёмном режиме (OLED)")
+    ap.add_argument("--list-presets", action="store_true",
+                     help="напечатать имена доступных готовых палитр и выйти")
+    ap.add_argument("--state-dir", type=Path,
+                     default=Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "dotline")
+    args = ap.parse_args()
+
+    if args.list_presets:
+        print("\n".join(sorted(PALETTE_PRESETS)))
+        return
+
+    if args.preset:
+        if args.image:
+            die(1, "--preset и путь к обоям вместе не имеют смысла — выберите одно.")
+        if args.mode == "auto":
+            print("palette-post: у --preset нет обоев, чтобы определить яркость — беру тёмный режим "
+                  "(укажите --mode light явно, если нужен светлый).", file=sys.stderr)
+        palette = build_palette_from_preset(args.preset, args.mode, args.oled)
+    else:
+        if not args.image:
+            die(1, "Нужен путь к обоям (или --preset <имя>).")
+        if not args.image.is_file():
+            die(1, f"Нет файла {args.image}")
+        palette = build_palette(args.image, args.mode, args.oled)
+
+    args.state_dir.mkdir(parents=True, exist_ok=True)
+    out = args.state_dir / "palette.json"
+    public = {k: v for k, v in palette.items() if not k.startswith("_")}
+    out.write_text(json.dumps(public, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    written = render_templates(palette, args.state_dir)
+    extra_notes = render_preset_extras(palette["_preset"], palette["mode"]) if "_preset" in palette else []
+
+    if "_preset" in palette:
+        mono_note = f"готовая палитра: {palette['_preset']}"
+    else:
+        mono_note = "обои монохромные → фирменный красный" if palette["_mono"] else "акцент из обоев"
+    print(f"mode={palette['mode']} accent={palette['accent']} ({mono_note}) "
+          f"contrast on={palette['_contrastOn']}:1 accent={palette['_contrastAccent']}:1")
+    print(f"palette.json → {out}")
+    for w in written:
+        print(f"template  → {w}")
+    for n in extra_notes:
+        print(f"preset    → {n}")
+
+
+if __name__ == "__main__":
+    main()

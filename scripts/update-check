@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# dotline-update-check: count pending updates, print as one JSON line.
+# Read by services/Updates.qml for the bar counter — never modifies
+# anything, every tool it shells out to is guarded by `command -v` so a
+# missing one just contributes 0 instead of an error.
+#
+#   {"pacman": N, "aur": N, "flatpak": N, "firmware": N, "total": N}
+#
+# Usage: update-check
+
+set -Eeuo pipefail
+
+count_lines() {
+    # Trims blank lines a tool might print even with nothing to report.
+    grep -c . 2>/dev/null || true
+}
+
+pacman_count=0
+if command -v checkupdates >/dev/null; then
+    # checkupdates (pacman-contrib): works against its own temp copy of the
+    # sync DBs, never touches the real one, no root needed — confirmed from
+    # its own docs, not `pacman -Qu`, which only reflects the last sync.
+    pacman_count="$(checkupdates 2>/dev/null | count_lines)"
+fi
+
+aur_count=0
+if command -v paru >/dev/null; then
+    aur_count="$(paru -Qua 2>/dev/null | count_lines)"
+fi
+
+flatpak_count=0
+if command -v flatpak >/dev/null; then
+    flatpak_count="$(flatpak list --updates --columns=application 2>/dev/null | count_lines)"
+fi
+
+firmware_count=0
+if command -v fwupdmgr >/dev/null; then
+    # exit code 2 means "no updates" (confirmed from fwupd's own docs, not
+    # an error) — the `|| true` keeps `set -e` from treating that as one.
+    fw_json="$(fwupdmgr get-updates --json 2>/dev/null || true)"
+    if [[ -n "$fw_json" ]] && command -v jq >/dev/null; then
+        # Schema's exact shape isn't pinned down with full confidence (fwupd's
+        # own docs only partially document it) — degrade to 0 rather than
+        # error on an unexpected shape from a different fwupd version.
+        firmware_count="$(printf '%s' "$fw_json" | jq '(.Devices // []) | length' 2>/dev/null || echo 0)"
+    fi
+fi
+
+pacman_count="${pacman_count:-0}"
+aur_count="${aur_count:-0}"
+flatpak_count="${flatpak_count:-0}"
+firmware_count="${firmware_count:-0}"
+total=$((pacman_count + aur_count + flatpak_count + firmware_count))
+
+jq -nc --argjson pacman "$pacman_count" --argjson aur "$aur_count" \
+       --argjson flatpak "$flatpak_count" --argjson firmware "$firmware_count" \
+       --argjson total "$total" \
+       '{pacman: $pacman, aur: $aur, flatpak: $flatpak, firmware: $firmware, total: $total}'

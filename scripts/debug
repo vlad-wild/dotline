@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# dotline-debug: collect a support bundle for diagnosing this rice —
+# versions, service logs, hardware info — and scrub lines that look like
+# secrets before packing it up.
+#
+#   dotline-debug [outfile]   default: ~/dotline-debug-<date>.tar.gz
+#
+# Best-effort secret scrubbing only (grep -vi for psk=/password/token/
+# key=-shaped lines in every log line collected) — not a guarantee, same
+# honest caveat as scripts/capture's QR-secret cliphist scrub. Never
+# reads /etc/NetworkManager/system-connections (where real Wi-Fi PSKs
+# live) at all, so there's nothing there to leak in the first place.
+#
+# niri and Quickshell aren't systemd units themselves (niri is spawned
+# directly by greetd, Quickshell by niri's spawn-at-startup) — there's no
+# confirmed persistent log location for either without a live session to
+# check, so this collects journalctl output only for things that genuinely
+# are systemd units (faceauthd, greetd, NetworkManager, bluetooth,
+# power-profiles-daemon, dotline-* units, PipeWire/WirePlumber user
+# units), and says so plainly rather than claiming niri/Quickshell logs
+# that might not exist.
+
+set -Eeuo pipefail
+
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
+OUT="${1:-$HOME/dotline-debug-$(date +%Y%m%d-%H%M%S).tar.gz}"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+scrub() {
+    grep -viE 'psk[ _-]?=|password|passwd|secret|token|api[_-]?key|bearer ' || true
+}
+
+{
+    echo "=== dotline-debug $(date -Is) ==="
+    echo "--- uname ---"; uname -a
+    echo "--- os-release ---"; cat /etc/os-release 2>/dev/null || true
+    echo "--- niri --version ---"; niri --version 2>&1 || echo "(niri не найден)"
+    echo "--- qs --version ---"; qs --version 2>&1 || echo "(qs не найден)"
+    echo "--- faceauth ---"; pacman -Q faceauth 2>&1 || echo "(не установлен)"
+    echo "--- dotline commit ---"
+    git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" rev-parse HEAD 2>&1 || true
+} > "$TMP/versions.txt"
+
+{
+    echo "--- platform_profile ---"
+    cat /sys/firmware/acpi/platform_profile 2>/dev/null || echo "(нет)"
+    echo "--- battery ---"
+    command -v dotline-battery >/dev/null && dotline-battery status 2>&1 || true
+    echo "--- mem_sleep ---"
+    cat /sys/power/mem_sleep 2>/dev/null || echo "(нет)"
+    echo "--- swap ---"
+    swapon --show 2>&1 || true
+    echo "--- lspci ---"
+    lspci 2>&1 || echo "(lspci недоступен)"
+    echo "--- lsusb ---"
+    lsusb 2>&1 || echo "(lsusb недоступен)"
+    echo "--- free ---"
+    free -h 2>&1 || true
+    echo "--- df ---"
+    df -h 2>&1 || true
+} > "$TMP/hardware.txt"
+
+for unit in faceauthd.socket faceauthd.service greetd.service NetworkManager.service \
+            bluetooth.service power-profiles-daemon.service dotline-battery-limit.service \
+            dotline-fwupd-refresh.service; do
+    journalctl -u "$unit" -b --no-pager 2>/dev/null | scrub > "$TMP/journal-$unit.txt" || true
+done
+
+for unit in pipewire.service pipewire-pulse.service wireplumber.service; do
+    journalctl --user -u "$unit" -b --no-pager 2>/dev/null | scrub > "$TMP/journal-user-$unit.txt" || true
+done
+
+cat > "$TMP/README.txt" << 'EOF'
+niri и Quickshell — не systemd-юниты (niri запускает greetd напрямую,
+Quickshell запускает niri через spawn-at-startup), поэтому их логов в
+этом архиве нет: подтверждённого постоянного места для них нет. Если
+нужно разобрать проблему именно с ними, запустите `qs -c dotline` в
+терминале живой сессии и приложите вывод вручную.
+
+Вычистка секретов из журналов выше — по шаблону (grep по строкам вида
+psk=/password/token/...), не разбор формата: не гарантия, а лучшее
+усилие. Прежде чем кому-то отправлять архив, проверьте его сами.
+EOF
+
+tar -czf "$OUT" -C "$TMP" .
+echo "Собрано: $OUT"
+echo "Проверьте архив перед тем, как кому-то его отправлять."

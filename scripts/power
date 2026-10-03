@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# dotline-osd's sibling for the power profile glyph: cycles
+# power-profiles-daemon's profile and tells Quickshell to flash it (see
+# osd/Osd.qml's "power" kind), same reasoning as scripts/osd — niri's own
+# `spawn` can change the profile but can't also poke the running shell.
+#
+#   dotline-power cycle          balanced -> performance -> power-saver -> …
+#   dotline-power set <profile>  power-saver | balanced | performance
+#
+# Doesn't parse `powerprofilesctl list`'s text (its exact format isn't
+# documented anywhere I could check against) — just tries the next name in
+# a fixed order and lets `set`'s own exit code say whether a profile
+# exists on this hardware (not every laptop has "performance").
+
+set -Eeuo pipefail
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+notify() {
+    qs -c dotline ipc call osd show power "$1" 0 >/dev/null 2>&1 || true
+}
+
+ORDER=(balanced performance power-saver)
+
+cycle() {
+    local current next
+    current="$(powerprofilesctl get)"
+    local start=0
+    for i in "${!ORDER[@]}"; do
+        [[ "${ORDER[$i]}" == "$current" ]] && start=$i
+    done
+    local i=$start
+    for _ in "${ORDER[@]}"; do
+        i=$(((i + 1) % ${#ORDER[@]}))
+        next="${ORDER[$i]}"
+        if powerprofilesctl set "$next" 2>/dev/null; then
+            notify "$next"
+            return 0
+        fi
+    done
+    echo "dotline-power: ни один профиль из ${ORDER[*]} не принят powerprofilesctl" >&2
+    return 1
+}
+
+case "${1:-}" in
+    cycle) cycle ;;
+    set)
+        [[ -n "${2:-}" ]] || usage
+        powerprofilesctl set "$2"
+        notify "$2"
+        ;;
+    "" | -h | --help) usage ;;
+    *) echo "dotline-power: неизвестная команда: $1" >&2; exit 1 ;;
+esac

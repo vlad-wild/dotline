@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""List launchable applications as JSON, for the Quickshell launcher.
+
+Scans .desktop files the standard XDG way: $XDG_DATA_HOME/applications
+(default ~/.local/share/applications) first, then each dir in
+$XDG_DATA_DIRS (default /usr/local/share:/usr/share) + /applications —
+first one found for a given desktop-file-id wins, matching the XDG
+priority order. Skips NoDisplay/Hidden entries and anything that isn't
+Type=Application.
+
+Output: a JSON array, sorted by name, of
+    {"name": str, "exec": str, "icon": str|null, "terminal": bool}
+`exec` has desktop-entry field codes (%f, %U, ...) already stripped, ready
+to split with shlex and spawn directly.
+
+Usage: list-apps
+"""
+from __future__ import annotations
+
+import configparser
+import json
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+FIELD_CODE_RE = re.compile(r"%[fFuUickdDnNvm]")
+
+
+def data_dirs() -> list[Path]:
+    home_dir = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    dirs = [Path(home_dir)]
+    extra = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    dirs += [Path(p) for p in extra.split(":") if p]
+    return dirs
+
+
+def parse_desktop_file(path: Path) -> dict | None:
+    cp = configparser.RawConfigParser(interpolation=None, strict=False)
+    try:
+        cp.read(path, encoding="utf-8")
+    except (OSError, UnicodeDecodeError, configparser.Error):
+        return None
+    if "Desktop Entry" not in cp:
+        return None
+    e = cp["Desktop Entry"]
+
+    if e.get("Type", "Application") != "Application":
+        return None
+    if e.getboolean("NoDisplay", fallback=False):
+        return None
+    if e.getboolean("Hidden", fallback=False):
+        return None
+    name = e.get("Name", "").strip()
+    exec_raw = e.get("Exec", "").strip()
+    if not name or not exec_raw:
+        return None
+
+    exec_clean = FIELD_CODE_RE.sub("", exec_raw)
+    exec_clean = re.sub(r"\s+", " ", exec_clean).strip()
+    try:
+        shlex.split(exec_clean)  # validate it's spawnable before we trust it
+    except ValueError:
+        return None
+
+    return {
+        "name": name,
+        "exec": exec_clean,
+        "icon": e.get("Icon", "").strip() or None,
+        "terminal": e.getboolean("Terminal", fallback=False),
+    }
+
+
+def collect() -> list[dict]:
+    seen_ids: set[str] = set()
+    apps: list[dict] = []
+    for base in data_dirs():
+        apps_dir = base / "applications"
+        if not apps_dir.is_dir():
+            continue
+        for path in sorted(apps_dir.glob("*.desktop")):
+            desktop_id = path.name
+            if desktop_id in seen_ids:
+                continue
+            seen_ids.add(desktop_id)
+            entry = parse_desktop_file(path)
+            if entry:
+                apps.append(entry)
+    apps.sort(key=lambda a: a["name"].casefold())
+    return apps
+
+
+def main() -> None:
+    json.dump(collect(), sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

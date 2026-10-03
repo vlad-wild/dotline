@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# dotline-wallpaper: set the wallpaper (via awww) and regenerate the palette.
+#
+#   dotline-wallpaper set <image> [--mode auto|dark|light]
+#   dotline-wallpaper random [dir]  [--mode ...]   (default dir: <repo>/wallpapers)
+#   dotline-wallpaper next [dir]    [--mode ...]   (alphabetically, wraps around)
+#
+# --mode defaults to whatever `dotline-theme` last set (auto if never set).
+# The niri "overview" blurred backdrop (a second awww-daemon --namespace) is
+# not wired up yet — this only drives the one wallpaper you see normally.
+
+set -Eeuo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source lib/common.sh
+source lib/palette.sh
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+WALLPAPERS_DIR="$RICE_ROOT/wallpapers"
+mode=""
+cmd="${1:-}"; shift || true
+args=()
+while (($#)); do
+    case "$1" in
+        --mode) mode="$2"; shift 2 ;;
+        --mode=*) mode="${1#*=}"; shift ;;
+        -h | --help) usage ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+
+[[ -n "$mode" ]] || mode="$(palette_saved_mode)"
+[[ "$mode" =~ ^(auto|dark|light)$ ]] || die "Режим должен быть auto, dark или light: $mode"
+
+ensure_awww_daemon() {
+    command -v awww >/dev/null || die "awww не найден (пакет awww из packages/desktop.txt)."
+    pgrep -x awww-daemon >/dev/null && return 0
+    note "Запускаю awww-daemon…"
+    setsid awww-daemon >/dev/null 2>&1 &
+    disown
+    local i
+    for i in $(seq 1 20); do
+        awww query >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    die "awww-daemon не ответил вовремя."
+}
+
+list_wallpapers() {
+    local dir="${1:-$WALLPAPERS_DIR}"
+    [[ -d "$dir" ]] || die "Нет папки с обоями: $dir"
+    find "$dir" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | sort
+}
+
+set_wallpaper() {
+    local image="$1"
+    [[ -f "$image" ]] || die "Нет файла $image"
+    image="$(cd "$(dirname "$image")" && pwd)/$(basename "$image")"
+    ensure_awww_daemon
+    step "Обои: $(basename "$image")"
+    run awww img --transition-type grow "$image"
+    palette_apply "$image" "$mode"
+}
+
+case "$cmd" in
+    set)
+        [[ ${#args[@]} -ge 1 ]] || die "Укажите картинку: dotline-wallpaper set <image>"
+        set_wallpaper "${args[0]}"
+        ;;
+    random)
+        mapfile -t all < <(list_wallpapers "${args[0]:-}")
+        ((${#all[@]})) || die "В папке с обоями ничего нет."
+        set_wallpaper "${all[$((RANDOM % ${#all[@]}))]}"
+        ;;
+    next)
+        mapfile -t all < <(list_wallpapers "${args[0]:-}")
+        ((${#all[@]})) || die "В папке с обоями ничего нет."
+        current="$(palette_saved_wallpaper)"
+        idx=0
+        for i in "${!all[@]}"; do [[ "${all[$i]}" == "$current" ]] && idx=$((i + 1)); done
+        set_wallpaper "${all[$((idx % ${#all[@]}))]}"
+        ;;
+    "" | -h | --help) usage ;;
+    *) die "Неизвестная команда: $cmd (см. dotline-wallpaper --help)" ;;
+esac

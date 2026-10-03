@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Import Windows Wi-Fi profiles (netsh wlan export) into NetworkManager.
+
+Windows side (run once, before leaving Windows):
+    netsh wlan export profile folder=D:\\wifi key=clear
+This writes one "Wi-Fi-<SSID>.xml" per saved network, with the password in
+the clear (that's what `key=clear` is for) — handle that folder carefully
+and delete it once imported.
+
+Parses against the real WLAN_profile schema (Microsoft's own published
+sample, not guessed): SSIDConfig/SSID/name for the SSID,
+MSM/security/authEncryption/authentication for the auth type, and
+MSM/security/sharedKey/keyMaterial for the PSK — all under the
+"https://www.microsoft.com/networking/WLAN/profile/v1" namespace the
+exported XML actually declares.
+
+Usage:
+    import-wifi-profiles [--dry-run] [--apply] <folder-with-xml-exports>
+Without --apply, only prints the nmcli commands it would run.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+NS = {"w": "https://www.microsoft.com/networking/WLAN/profile/v1"}
+
+# WLANProfile/MSM/security/authEncryption/authentication values that mean
+# "no pre-shared key to hand nmcli" — enterprise networks need RADIUS/
+# certificate setup this export doesn't carry, open ones need no secret.
+ENTERPRISE_AUTH = {"WPA2", "WPA", "WPA3ENT", "WPA3", "RSNA", "WPA2ENT"}
+OPEN_AUTH = {"open"}
+
+
+def parse_profile(path: Path) -> dict | None:
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as e:
+        print(f"import-wifi-profiles: {path.name}: не похоже на XML ({e}), пропускаю", file=sys.stderr)
+        return None
+
+    ssid = root.findtext("w:SSIDConfig/w:SSID/w:name", namespaces=NS)
+    if not ssid:
+        print(f"import-wifi-profiles: {path.name}: нет SSIDConfig/SSID/name, пропускаю", file=sys.stderr)
+        return None
+
+    auth = root.findtext("w:MSM/w:security/w:authEncryption/w:authentication", namespaces=NS, default="")
+    uses_1x = (root.findtext("w:MSM/w:security/w:authEncryption/w:useOneX", namespaces=NS, default="false")
+               .strip().lower() == "true")
+    key = root.findtext("w:MSM/w:security/w:sharedKey/w:keyMaterial", namespaces=NS)
+
+    if uses_1x or auth in ENTERPRISE_AUTH:
+        print(f"import-wifi-profiles: «{ssid}» — WPA-Enterprise/802.1X, "
+              f"в этом экспорте нет сертификатов/RADIUS — настройте вручную, пропускаю", file=sys.stderr)
+        return None
+    if auth not in OPEN_AUTH and not key:
+        print(f"import-wifi-profiles: «{ssid}» — ожидался пароль ({auth}), но keyMaterial пуст "
+              f"(экспортировали без key=clear?), пропускаю", file=sys.stderr)
+        return None
+
+    return {"ssid": ssid, "open": auth in OPEN_AUTH, "key": key}
+
+
+def nmcli_command(profile: dict) -> list[str]:
+    cmd = ["nmcli", "connection", "add", "type", "wifi",
+           "con-name", profile["ssid"], "ssid", profile["ssid"]]
+    if not profile["open"]:
+        cmd += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", profile["key"]]
+    return cmd
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("folder", type=Path)
+    ap.add_argument("--apply", action="store_true", help="actually run nmcli (default: print only)")
+    args = ap.parse_args()
+
+    if not args.folder.is_dir():
+        print(f"import-wifi-profiles: нет папки {args.folder}", file=sys.stderr)
+        sys.exit(1)
+
+    xml_files = sorted(args.folder.glob("*.xml"))
+    if not xml_files:
+        print(f"import-wifi-profiles: в {args.folder} нет .xml файлов", file=sys.stderr)
+        sys.exit(1)
+
+    imported = skipped = 0
+    for path in xml_files:
+        profile = parse_profile(path)
+        if not profile:
+            skipped += 1
+            continue
+        cmd = nmcli_command(profile)
+        shown = cmd if not profile["key"] else cmd[:-1] + ["***"]
+        print("  $ " + " ".join(shown))
+        if args.apply:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"    ! nmcli: {result.stderr.strip()}", file=sys.stderr)
+                skipped += 1
+                continue
+        imported += 1
+
+    verb = "Импортировано" if args.apply else "Будет импортировано (запустите с --apply)"
+    print(f"{verb}: {imported}, пропущено: {skipped}")
+
+
+if __name__ == "__main__":
+    main()

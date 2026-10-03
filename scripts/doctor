@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# dotline-doctor: quick health check — services, PAM, groups, versions,
+# swap/resume — with next-step hints, not just pass/fail.
+#
+#   dotline-doctor
+#
+# Read-only: never changes anything. No sudo needed — systemctl status of
+# a system unit and reading /etc/pam.d/* don't require root.
+
+set -Eeuo pipefail
+
+usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
+
+ok()      { printf '  \033[32m✔\033[0m %s\n' "$*"; }
+doc_warn(){ printf '  \033[33m⚠\033[0m %s\n' "$*"; }
+bad()     { printf '  \033[31m✘\033[0m %s\n' "$*"; }
+section() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+service_check() {
+    local unit="$1" label="${2:-$1}"
+    if ! systemctl list-unit-files "$unit" &>/dev/null; then
+        doc_warn "$label: юнит не найден (пакет не установлен?)"
+        return 0
+    fi
+    if systemctl is-active --quiet "$unit"; then
+        ok "$label: активен"
+    elif systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+        doc_warn "$label: включён, но не запущен"
+    else
+        bad "$label: не включён"
+    fi
+}
+
+section "niri"
+if command -v niri >/dev/null; then
+    ok "niri установлен: $(niri --version 2>&1 | head -1)"
+    if [[ -f "$HOME/.config/niri/config.kdl" ]]; then
+        if niri validate -c "$HOME/.config/niri/config.kdl" &>/dev/null; then
+            ok "config.kdl: валиден"
+        else
+            bad "config.kdl: ошибка валидации — niri validate -c ~/.config/niri/config.kdl"
+        fi
+    else
+        doc_warn "~/.config/niri/config.kdl не найден (stow не выполнен?)"
+    fi
+else
+    bad "niri не установлен"
+fi
+
+section "Quickshell"
+if command -v qs >/dev/null; then
+    ok "qs установлен"
+else
+    bad "qs (Quickshell) не установлен"
+fi
+if [[ -d "$HOME/.config/quickshell/dotline" ]]; then
+    ok "конфиг dotline на месте"
+else
+    doc_warn "~/.config/quickshell/dotline не найден (stow не выполнен?)"
+fi
+
+section "faceauth"
+if command -v faceauth >/dev/null; then
+    ok "faceauth установлен"
+    service_check faceauthd.socket "faceauthd.socket"
+else
+    doc_warn "faceauth не установлен — вход по лицу недоступен"
+fi
+for f in /etc/pam.d/sudo /etc/pam.d/polkit-1 /etc/pam.d/greetd; do
+    [[ -f "$f" ]] || continue
+    if grep -q faceauth-auth "$f" 2>/dev/null; then
+        ok "$f: строка faceauth на месте"
+    else
+        doc_warn "$f: без faceauth (лицо для этого сервиса выключено)"
+    fi
+done
+
+section "Службы"
+service_check NetworkManager.service "NetworkManager"
+service_check bluetooth.service "Bluetooth"
+service_check power-profiles-daemon.service "power-profiles-daemon"
+service_check greetd.service "greetd"
+service_check dotline-battery-limit.service "dotline-battery-limit"
+service_check dotline-fwupd-refresh.timer "dotline-fwupd-refresh.timer"
+
+section "Группы пользователя ($(id -un))"
+groups_have="$(id -nG 2>/dev/null || true)"
+for g in video render; do
+    if grep -qw "$g" <<<"$groups_have"; then
+        ok "группа $g"
+    else
+        doc_warn "нет в группе $g"
+    fi
+done
+if command -v ddcutil >/dev/null; then
+    if grep -qw i2c <<<"$groups_have"; then
+        ok "группа i2c (ddcutil)"
+    else
+        doc_warn "ddcutil установлен, но нет в группе i2c"
+    fi
+fi
+
+section "Сон и гибернация"
+echo "  mem_sleep: $(cat /sys/power/mem_sleep 2>/dev/null || echo '?')"
+if swapon --show --noheadings 2>/dev/null | grep -q .; then
+    ok "swap активен"
+else
+    doc_warn "swap не активен — suspend-then-hibernate не сработает (см. docs/battery.md)"
+fi
+if grep -q 'resume=' /proc/cmdline 2>/dev/null; then
+    ok "resume= есть в cmdline ядра"
+else
+    doc_warn "resume= не найден в /proc/cmdline — гибернация, скорее всего, не настроена"
+fi
+
+section "Палитра"
+if [[ -f "$HOME/.local/state/dotline/palette.json" ]]; then
+    ok "palette.json есть"
+else
+    doc_warn "обои ещё не задавались (dotline-wallpaper set <файл>)"
+fi
+
+echo
+echo "Готово. Полный архив для отладки: dotline-debug"

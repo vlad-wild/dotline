@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# dotline-battery: ASUS-style charge limit (replaces MyASUS's "Battery
+# Health Charging"), plus a quick status readout.
+#
+#   dotline-battery status             percent, charging?, limit, health
+#   dotline-battery limit <60|80|100>  set and persist the charge limit
+#   dotline-battery full-once          allow 100% this charge only — the
+#                                       saved limit comes back on the next
+#                                       boot/resume (dotline-battery-limit
+#                                       .service / system-sleep hook)
+#
+# `limit`/`full-once` need root (sudo, asked for here directly — this repo
+# has no polkit helper yet to wire this into a GUI toggle, see
+# docs/battery.md). `status` and `reapply` don't.
+#
+# Battery name varies by model/firmware (BAT0, BAT1, BATC, ...) — found by
+# globbing, never hardcoded. Whether this laptop's kernel exposes
+# charge_control_end_threshold at all, and which values it actually
+# accepts (some firmwares only take 60/80/100 in steps, not any integer
+# 1-100), is honestly **not verified** here — `limit` reports whatever the
+# kernel says on a rejected write instead of pretending to know in advance.
+#
+# `reapply` (no root check — it's meant to be run as root, by
+# dotline-battery-limit.service at boot and by the system-sleep hook after
+# resume; both of which duplicate this exact logic inline rather than call
+# back into this script, since a system-level hook has no idea where this
+# git checkout lives — see those two files for why).
+
+set -Eeuo pipefail
+
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+CONFIG_DIR=/etc/dotline
+CONFIG_FILE="$CONFIG_DIR/charge-limit"
+
+threshold_path() {
+    local p
+    for p in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
+        [[ -e "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    done
+    return 1
+}
+
+battery_dir() { dirname "$(threshold_path)" 2>/dev/null || true; }
+
+status() {
+    local full full_design health bat p
+    bat=""
+    for p in /sys/class/power_supply/BAT*/capacity; do [[ -e "$p" ]] && bat="$(dirname "$p")" && break; done
+    if [[ -z "$bat" ]]; then
+        echo "Батарея не найдена (нет /sys/class/power_supply/BAT*)."
+        return 0
+    fi
+    echo "Заряд: $(cat "$bat/capacity" 2>/dev/null || echo '?')% ($(cat "$bat/status" 2>/dev/null || echo '?'))"
+    if [[ -e "$bat/charge_control_end_threshold" ]]; then
+        echo "Лимит зарядки: $(cat "$bat/charge_control_end_threshold")%"
+    else
+        echo "Лимит зарядки: не поддерживается этим ядром/моделью."
+    fi
+    if [[ -e "$bat/energy_full" && -e "$bat/energy_full_design" ]]; then
+        full="$(cat "$bat/energy_full")"; full_design="$(cat "$bat/energy_full_design")"
+    elif [[ -e "$bat/charge_full" && -e "$bat/charge_full_design" ]]; then
+        full="$(cat "$bat/charge_full")"; full_design="$(cat "$bat/charge_full_design")"
+    fi
+    if [[ -n "${full:-}" && -n "${full_design:-}" && "${full_design:-0}" -gt 0 ]]; then
+        health=$(( full * 100 / full_design ))
+        echo "Здоровье батареи: ${health}% от паспортной ёмкости"
+    fi
+    [[ -e "$bat/cycle_count" ]] && echo "Циклов заряда: $(cat "$bat/cycle_count")"
+}
+
+write_threshold() {
+    local value="$1" path
+    path="$(threshold_path)" || {
+        echo "Эта модель не отдаёт charge_control_end_threshold — лимит зарядки недоступен." >&2
+        return 1
+    }
+    if ! echo "$value" | sudo tee "$path" >/dev/null; then
+        echo "Ядро отклонило значение $value — возможно, эта модель принимает только определённые шаги (например 60/80/100)." >&2
+        return 1
+    fi
+    echo "Применено: ${value}%"
+}
+
+limit() {
+    local value="${1:?Укажите значение: dotline-battery limit <60|80|100>}"
+    write_threshold "$value"
+    sudo mkdir -p "$CONFIG_DIR"
+    printf '%s\n' "$value" | sudo tee "$CONFIG_FILE" >/dev/null
+    echo "Сохранено — будет применяться автоматически при загрузке и пробуждении."
+}
+
+full_once() {
+    write_threshold 100
+    local saved=100
+    [[ -f "$CONFIG_FILE" ]] && saved="$(cat "$CONFIG_FILE")"
+    echo "Один раз до 100%. После перезагрузки/пробуждения вернётся сохранённый лимит (${saved}%)."
+}
+
+reapply() {
+    [[ -f "$CONFIG_FILE" ]] || exit 0
+    local path
+    path="$(threshold_path)" || exit 0
+    cat "$CONFIG_FILE" >"$path" 2>/dev/null || true
+}
+
+main() {
+    case "${1:-}" in
+        status) status ;;
+        limit) limit "${2:-}" ;;
+        full-once) full_once ;;
+        reapply) reapply ;;
+        "" | -h | --help) usage ;;
+        *) echo "Неизвестная команда: $1 (см. dotline-battery --help)" >&2; exit 1 ;;
+    esac
+}
+
+main "$@"

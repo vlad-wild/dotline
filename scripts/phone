@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""KDE Connect bridge for the Quickshell phone glyph/menu.
+
+Long-running, event-driven (GLib main loop + D-Bus signal subscriptions, no
+polling): prints one JSON line per known device every time anything about it
+changes, and accepts one command per line on stdin to act on a device.
+
+D-Bus surface used below is quoted from kdeconnect-kde's own headers
+(core/daemon.h, core/device.h, plugins/{battery,findmyphone,ping,share,sftp}),
+not guessed — see docs/phone.md for where each one came from.
+
+Output (one JSON object per line, emitted whenever anything changes):
+    {"event": "device", "id": str, "name": str,
+     "reachable": bool, "paired": bool,
+     "pairRequested": bool, "pairRequestedByPeer": bool,
+     "battery": {"charge": int, "charging": bool} | null}
+    {"event": "error", "message": str}
+
+Commands (stdin, one per line, space-separated):
+    pair <id>      unpair <id>     accept <id>     reject <id>
+    ring [id]      ping [id]       browse [id]     share <path> [id]
+`id` defaults to the first reachable+paired device when omitted — fine with
+one phone, which is all this rice assumes (see docs/phone.md).
+
+Usage: dotline-phone
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("GLib", "2.0")
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+BUS_NAME = "org.kde.kdeconnect"
+DAEMON_PATH = "/modules/kdeconnect"
+DAEMON_IFACE = "org.kde.kdeconnect.daemon"
+DEVICE_IFACE = "org.kde.kdeconnect.device"
+BATTERY_IFACE = "org.kde.kdeconnect.device.battery"
+FINDMYPHONE_IFACE = "org.kde.kdeconnect.device.findmyphone"
+PING_IFACE = "org.kde.kdeconnect.device.ping"
+SHARE_IFACE = "org.kde.kdeconnect.device.share"
+SFTP_IFACE = "org.kde.kdeconnect.device.sftp"
+
+CALL_TIMEOUT_MS = 5000
+
+
+def emit(obj: dict) -> None:
+    print(json.dumps(obj), flush=True)
+
+
+def device_path(device_id: str) -> str:
+    return f"{DAEMON_PATH}/devices/{device_id}"
+
+
+class Phone:
+    def __init__(self) -> None:
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.known: set[str] = set()
+
+    # ---------- low-level D-Bus call helpers ----------
+
+    def call(self, path: str, iface: str, method: str, args: GLib.Variant | None = None):
+        return self.bus.call_sync(
+            BUS_NAME, path, iface, method, args, None,
+            Gio.DBusCallFlags.NONE, CALL_TIMEOUT_MS, None,
+        )
+
+    def call0(self, path: str, iface: str, method: str):
+        """Call a no-arg method, return its single unpacked return value (or None)."""
+        result = self.call(path, iface, method)
+        values = result.unpack()
+        return values[0] if values else None
+
+    # ---------- device snapshot ----------
+
+    def device_snapshot(self, device_id: str) -> dict:
+        path = device_path(device_id)
+        snap = {
+            "event": "device",
+            "id": device_id,
+            "name": self.call0(path, DEVICE_IFACE, "name"),
+            "reachable": bool(self.call0(path, DEVICE_IFACE, "isReachable")),
+            "paired": bool(self.call0(path, DEVICE_IFACE, "isPaired")),
+            "pairRequested": bool(self.call0(path, DEVICE_IFACE, "isPairRequested")),
+            "pairRequestedByPeer": bool(self.call0(path, DEVICE_IFACE, "isPairRequestedByPeer")),
+            "battery": None,
+        }
+        try:
+            snap["battery"] = {
+                "charge": int(self.call0(path, BATTERY_IFACE, "charge")),
+                "charging": bool(self.call0(path, BATTERY_IFACE, "isCharging")),
+            }
+        except GLib.Error:
+            pass  # battery plugin not enabled on this device — fine, leave null
+        return snap
+
+    def refresh_all(self) -> None:
+        try:
+            # devices(onlyReachable=false, onlyPaired=false): everything we
+            # currently know about, so an offline-but-paired phone still
+            # shows (dimmed) and a nearby unpaired one offers "pair".
+            ids = self.call(
+                DAEMON_PATH, DAEMON_IFACE, "devices",
+                GLib.Variant("(bb)", (False, False)),
+            ).unpack()[0]
+        except GLib.Error as e:
+            emit({"event": "error", "message": f"daemon devices() failed: {e}"})
+            return
+        self.known = set(ids)
+        for device_id in ids:
+            try:
+                emit(self.device_snapshot(device_id))
+            except GLib.Error as e:
+                emit({"event": "error", "message": f"device {device_id}: {e}"})
+
+    # ---------- commands ----------
+
+    def pick_device(self, explicit_id: str | None) -> str | None:
+        if explicit_id:
+            return explicit_id
+        for device_id in self.known:
+            try:
+                path = device_path(device_id)
+                if self.call0(path, DEVICE_IFACE, "isPaired") and self.call0(path, DEVICE_IFACE, "isReachable"):
+                    return device_id
+            except GLib.Error:
+                continue
+        return None
+
+    def handle_command(self, line: str) -> None:
+        parts = line.strip().split()
+        if not parts:
+            return
+        cmd, args = parts[0], parts[1:]
+        try:
+            if cmd in ("pair", "unpair", "accept", "reject"):
+                if not args:
+                    emit({"event": "error", "message": f"{cmd}: нужен id устройства"})
+                    return
+                path = device_path(args[0])
+                method = {"pair": "requestPairing", "unpair": "unpair",
+                          "accept": "acceptPairing", "reject": "cancelPairing"}[cmd]
+                self.call(path, DEVICE_IFACE, method)
+            elif cmd == "ring":
+                device_id = self.pick_device(args[0] if args else None)
+                if not device_id:
+                    emit({"event": "error", "message": "ring: нет подключённого телефона"})
+                    return
+                self.call(device_path(device_id), FINDMYPHONE_IFACE, "ring")
+            elif cmd == "ping":
+                device_id = self.pick_device(args[0] if args else None)
+                if not device_id:
+                    emit({"event": "error", "message": "ping: нет подключённого телефона"})
+                    return
+                self.call(device_path(device_id), PING_IFACE, "sendPing")
+            elif cmd == "share":
+                if not args:
+                    emit({"event": "error", "message": "share: укажите путь к файлу"})
+                    return
+                file_path, rest = args[0], args[1:]
+                device_id = self.pick_device(rest[0] if rest else None)
+                if not device_id:
+                    emit({"event": "error", "message": "share: нет подключённого телефона"})
+                    return
+                url = GLib.filename_to_uri(file_path, None)
+                self.call(device_path(device_id), SHARE_IFACE, "shareUrl", GLib.Variant("(s)", (url,)))
+            elif cmd == "browse":
+                device_id = self.pick_device(args[0] if args else None)
+                if not device_id:
+                    emit({"event": "error", "message": "browse: нет подключённого телефона"})
+                    return
+                path = device_path(device_id)
+                self.call(path, SFTP_IFACE, "mountAndWait")
+                mount_point = self.call0(path, SFTP_IFACE, "mountPoint")
+                if mount_point:
+                    subprocess.Popen(["xdg-open", mount_point])
+                else:
+                    emit({"event": "error", "message": "browse: не удалось смонтировать (sftp-плагин выключен на телефоне?)"})
+            else:
+                emit({"event": "error", "message": f"неизвестная команда: {cmd}"})
+        except Exception as e:  # noqa: BLE001 — a bad command must never kill this long-running bridge
+            emit({"event": "error", "message": f"{cmd}: {e}"})
+        self.refresh_all()
+
+    # ---------- signal wiring ----------
+
+    def subscribe(self) -> None:
+        def on_any_change(*_a):
+            self.refresh_all()
+
+        for iface, member in (
+            (DAEMON_IFACE, "deviceAdded"),
+            (DAEMON_IFACE, "deviceRemoved"),
+            (DAEMON_IFACE, "deviceVisibilityChanged"),
+            (DAEMON_IFACE, "deviceListChanged"),
+            (DAEMON_IFACE, "pairingRequestsChanged"),
+            (DEVICE_IFACE, "nameChanged"),
+            (DEVICE_IFACE, "reachableChanged"),
+            (DEVICE_IFACE, "pairStateChanged"),
+            (BATTERY_IFACE, "refreshed"),
+        ):
+            # object_path=None: matches any device path, not just the daemon's.
+            self.bus.signal_subscribe(
+                BUS_NAME, iface, member, None, None,
+                Gio.DBusSignalFlags.NONE, on_any_change,
+            )
+
+    def on_stdin(self, channel: GLib.IOChannel, condition) -> bool:
+        if condition & (GLib.IOCondition.HUP | GLib.IOCondition.ERR):
+            sys.exit(0)
+        status, line, _len, _term = channel.read_line()
+        if status == GLib.IOStatus.EOF:
+            sys.exit(0)
+        if line:
+            self.handle_command(line)
+        return True
+
+
+def main() -> None:
+    phone = Phone()
+    phone.subscribe()
+    phone.refresh_all()
+
+    stdin = GLib.IOChannel.unix_new(sys.stdin.fileno())
+    stdin.set_flags(GLib.IOFlags.NONBLOCK)
+    GLib.io_add_watch(stdin, GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, phone.on_stdin)
+
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

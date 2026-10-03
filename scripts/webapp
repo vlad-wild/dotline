@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""dotline-webapp: turn a URL into a launchable app (plan's "веб-приложения").
+
+    dotline-webapp add <name> <url>    create a .desktop entry + icon
+    dotline-webapp list [--json]       list webapps this created
+    dotline-webapp remove <name>
+
+Creates ~/.local/share/applications/dotline-webapp-<slug>.desktop with
+`Exec=chromium --app=<url> --class=webapp-<slug>` — a real Chromium/
+Chrome app window, not a browser tab, matching the plan's own wording.
+Marked with `X-Dotline-WebApp=true` so `list`/`remove` can find exactly
+the entries this script made, without guessing from the Exec line.
+
+Deliberately **not** recorded in the rice manifest and **not** touched by
+uninstall.sh (plan's own words: "в манифест рис не записываются") — these
+are the user's own on-the-fly shortcuts, not something the rice installed.
+
+Icon: best-effort fetch of <site>/favicon.ico via curl, converted to PNG
+with ImageMagick (already a base dependency — see packages/desktop.txt
+and scripts/palette-post's image_mean_brightness(), same magick/convert
+fallback order). If the fetch or conversion fails, the .desktop still
+gets written, just without an Icon= line — list-apps.py already treats a
+missing icon as a soft, letter-in-a-circle fallback case, not an error.
+"""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import urlparse
+
+APPS_DIR = Path.home() / ".local/share/applications"
+ICONS_DIR = Path.home() / ".local/share/dotline/webapp-icons"
+PREFIX = "dotline-webapp-"
+
+
+def slugify(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip().lower()).strip("-")
+    return s or "app"
+
+
+def desktop_path(slug: str) -> Path:
+    return APPS_DIR / f"{PREFIX}{slug}.desktop"
+
+
+def fetch_icon(url: str, slug: str) -> Path | None:
+    host = urlparse(url).netloc
+    if not host:
+        return None
+    ico_path = ICONS_DIR / f"{slug}.ico"
+    try:
+        urllib.request.urlretrieve(f"https://{host}/favicon.ico", ico_path)
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    if ico_path.stat().st_size == 0:
+        ico_path.unlink(missing_ok=True)
+        return None
+    png_path = ICONS_DIR / f"{slug}.png"
+    for exe in ("magick", "convert"):
+        tool = shutil.which(exe)
+        if not tool:
+            continue
+        args = [tool, str(ico_path), str(png_path)]
+        try:
+            out = subprocess.run(args, capture_output=True, timeout=20, check=False)
+        except OSError:
+            continue
+        if out.returncode == 0 and png_path.exists():
+            ico_path.unlink(missing_ok=True)
+            return png_path
+    # No ImageMagick (or conversion failed) — the raw .ico is still a
+    # valid file reference for Icon=, most icon themes just render it
+    # less nicely than a PNG would.
+    return ico_path
+
+
+def add(name: str, url: str) -> None:
+    if not re.match(r"^https?://", url):
+        sys.exit(f"URL должен начинаться с http:// или https://: {url}")
+    slug = slugify(name)
+    APPS_DIR.mkdir(parents=True, exist_ok=True)
+    ICONS_DIR.mkdir(parents=True, exist_ok=True)
+    icon = fetch_icon(url, slug)
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={name}",
+        f"Exec=chromium --app={url} --class=webapp-{slug}",
+        "Categories=Network;",
+        "X-Dotline-WebApp=true",
+    ]
+    if icon:
+        lines.insert(4, f"Icon={icon}")
+    desktop_path(slug).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Добавлено: {name} ({url}) — {desktop_path(slug)}")
+
+
+def list_webapps(as_json: bool) -> None:
+    import configparser
+
+    entries = []
+    if APPS_DIR.is_dir():
+        for p in sorted(APPS_DIR.glob(f"{PREFIX}*.desktop")):
+            cp = configparser.RawConfigParser(interpolation=None, strict=False)
+            try:
+                cp.read(p, encoding="utf-8")
+            except (OSError, configparser.Error):
+                continue
+            e = cp.get("Desktop Entry", "Name", fallback=p.stem)
+            exec_line = cp.get("Desktop Entry", "Exec", fallback="")
+            entries.append({"name": e, "slug": p.stem[len(PREFIX):], "exec": exec_line})
+    if as_json:
+        print(json.dumps(entries, ensure_ascii=False))
+        return
+    if not entries:
+        print("Веб-приложений нет.")
+        return
+    for e in entries:
+        print(f"{e['name']}  ({e['slug']})")
+
+
+def remove(name: str) -> None:
+    slug = slugify(name)
+    path = desktop_path(slug)
+    if not path.exists():
+        # Fall back to treating the argument as a slug directly, in case
+        # the caller already has one from `list --json`.
+        path = desktop_path(name)
+    if not path.exists():
+        sys.exit(f"Не найдено: {name}")
+    stem = path.stem[len(PREFIX):]
+    for ext in (".png", ".ico"):
+        (ICONS_DIR / f"{stem}{ext}").unlink(missing_ok=True)
+    path.unlink()
+    print(f"Удалено: {name}")
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    cmd, rest = args[0], args[1:]
+    if cmd == "add":
+        if len(rest) < 2:
+            sys.exit("dotline-webapp add <name> <url>")
+        add(rest[0], rest[1])
+    elif cmd == "list":
+        list_webapps(as_json="--json" in rest)
+    elif cmd == "remove":
+        if not rest:
+            sys.exit("dotline-webapp remove <name>")
+        remove(rest[0])
+    else:
+        sys.exit(f"Неизвестная команда: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

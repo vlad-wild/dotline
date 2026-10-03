@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# dotline-theme: switch light/dark without changing the wallpaper, or
+# switch to/from a ready-made palette instead of one derived from it.
+#
+#   dotline-theme auto|dark|light      set and re-apply immediately
+#   dotline-theme preset <name> [mode] switch to a ready-made palette
+#                                      (name: see `preset list`); mode
+#                                      defaults to dark
+#   dotline-theme preset wallpaper     switch back to the wallpaper-derived
+#                                      palette (at its last saved mode)
+#   dotline-theme preset list          print the available preset names
+#   dotline-theme oled on|off          force pure-black surface in dark mode
+#   dotline-theme status               current mode/wallpaper/preset/oled
+
+set -Eeuo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source lib/common.sh
+source lib/palette.sh
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+cmd="${1:-}"
+
+case "$cmd" in
+    auto | dark | light)
+        image="$(palette_saved_wallpaper)"
+        [[ -n "$image" ]] || die "Обои ещё не задавались — сначала dotline-wallpaper set <image>."
+        [[ -f "$image" ]] || die "Сохранённые обои пропали: $image"
+        step "Тема: $cmd"
+        palette_apply "$image" "$cmd"
+        ;;
+    preset)
+        sub="${2:-}"
+        if [[ "$sub" == "list" ]]; then
+            "$RICE_ROOT/scripts/palette-post" --list-presets
+        elif [[ "$sub" == "wallpaper" ]]; then
+            image="$(palette_saved_wallpaper)"
+            [[ -n "$image" ]] || die "Обои ещё не задавались — нечего восстанавливать."
+            step "Тема: обои (вместо готовой палитры)"
+            palette_apply "$image" "$(palette_saved_mode)"
+        else
+            [[ -n "$sub" ]] || die "Укажите имя палитры (см. dotline-theme preset list)."
+            mode="${3:-dark}"
+            step "Тема: готовая палитра $sub ($mode)"
+            palette_apply_preset "$sub" "$mode"
+        fi
+        ;;
+    oled)
+        state="${2:-}"
+        case "$state" in
+            on | off) palette_set_oled "$state"; info "OLED: $state" ;;
+            *) die "dotline-theme oled on|off" ;;
+        esac
+        ;;
+    status)
+        printf 'Режим:  %s\n' "$(palette_saved_mode)"
+        preset="$(palette_saved_preset)"
+        if [[ -n "$preset" ]]; then
+            printf 'Палитра: %s\n' "$preset"
+        else
+            wallpaper="$(palette_saved_wallpaper)"
+            printf 'Обои:   %s\n' "${wallpaper:-(не заданы)}"
+        fi
+        printf 'OLED:   %s\n' "$(palette_oled_enabled && echo on || echo off)"
+        ;;
+    "" | -h | --help) usage ;;
+    *) die "Неизвестная команда: $cmd (см. dotline-theme --help)" ;;
+esac
