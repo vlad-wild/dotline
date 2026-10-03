@@ -34,7 +34,7 @@ ASUS Zenbook 14 UX3405CA, NVMe 1 ТБ, Windows с BitLocker. Результат:
    shrink desired=<МБ>      # например, 277725 для ~271 ГБ
    exit
    ```
-   Если потолок заметно меньше ожидаемого (отъедают `hiberfil.sys`/`pagefile.sys`/теневые копии) — можно временно `powercfg /hibernate off` и отключить файл подкачки (Параметры → Система → О системе → Дополнительные параметры системы → Быстродействие → Виртуальная память → «Без файла подкачки»), перезагрузиться и повторить `shrink querymax`; оба можно вернуть обратно уже после `shrink`. Освобождённое место остаётся **нераспределённым** — отдельный том создавать не нужно, archinstall разметит его сам.
+   Если потолок заметно меньше ожидаемого (отъедают `hiberfil.sys`/`pagefile.sys`/теневые копии) — можно временно `powercfg /hibernate off` и отключить файл подкачки (Параметры → Система → О системе → Дополнительные параметры системы → Быстродействие → Виртуальная память → «Без файла подкачки»), перезагрузиться и повторить `shrink querymax`; оба можно вернуть обратно уже после `shrink`. Освобождённое место остаётся **нераспределённым** — отдельный том создавать не нужно, разметка руками через `sgdisk` в разделе 4.
 3. **Записать ISO Arch** на флешку: Rufus в режиме DD или Ventoy. ISO берём с https://archlinux.org/download/ и проверяем подпись.
 
 ## 2. BIOS (F2 при включении)
@@ -104,26 +104,49 @@ btrfs filesystem mkswapfile --size 32g --uuid clear /mnt/swap/swapfile
 swapon /mnt/swap/swapfile
 ```
 
-## 5. Установка через archinstall (с подготовленными разделами)
+## 5. Базовая система (pacstrap)
+
+Без `archinstall` целиком: его режим *Pre-mounted configuration*
+слишком хрупко определяет корневой раздел по смонтированному `/mnt`
+(версионно-зависимо, у разных сборок ISO ведёт себя по-разному) — раз
+всё уже размечено и смонтировано руками в разделе 4, надёжнее сделать
+и установку руками.
 
 ```bash
-archinstall
+pacstrap -K /mnt base base-devel linux linux-lts linux-firmware \
+  intel-ucode sof-firmware btrfs-progs snapper snap-pac \
+  networkmanager git nano
 ```
 
-Настройки:
-- **Disk configuration** → *Pre-mounted configuration* → `/mnt`;
-- **Bootloader** → systemd-boot, **Unified kernel images** → да;
-- **Swap on zram** → нет: swapfile уже есть, а гибернации нужен настоящий swap;
-- **Profile** → *Minimal*: рабочее окружение поставит `install.sh`;
-- **Audio** → PipeWire, **Network** → NetworkManager;
-- **Kernels** → `linux` (+ `linux-lts` как запасное);
-- **Additional packages** → `git base-devel intel-ucode sof-firmware btrfs-progs snapper snap-pac`;
-- **Optional repositories** → *multilib* (Steam и 32-битные драйверы для eGPU);
-- пользователь `these` с sudo, часовой пояс `Europe/Moscow`, локали `en_US.UTF-8` и `ru_RU.UTF-8`.
+```bash
+genfstab -U /mnt >> /mnt/etc/fstab
+echo '/swap/swapfile none swap defaults 0 0' >> /mnt/etc/fstab
+cat /mnt/etc/fstab   # ⚠ проверить: у каждого подтома свой subvol=, swapfile на месте, дублей нет
+```
 
-## 6. Перед первой перезагрузкой (в chroot)
+## 6. Настройка системы (chroot)
 
-archinstall в конце предлагает chroot — соглашаемся.
+```bash
+arch-chroot /mnt
+```
+
+```bash
+ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
+hwclock --systohc
+
+sed -i 's/^#\(en_US\.UTF-8\)/\1/; s/^#\(ru_RU\.UTF-8\)/\1/' /etc/locale.gen
+locale-gen
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+
+echo 'dotline' > /etc/hostname   # или любое другое имя машины
+
+passwd                                    # пароль root
+useradd -m -G wheel -s /bin/bash these
+passwd these
+EDITOR=nano visudo                        # раскомментировать: %wheel ALL=(ALL:ALL) ALL
+
+systemctl enable NetworkManager
+```
 
 ```bash
 # 6.1 Шифрование и гибернация в initramfs (systemd-хуки):
@@ -135,21 +158,62 @@ nano /etc/mkinitcpio.conf
 blkid -s UUID -o value /dev/nvme0n1p6
 nano /etc/kernel/cmdline
 # resume= не нужен: systemd ≥ 255 сам записывает место гибернации в EFI-переменную.
+```
 
-# 6.3 swapfile в fstab (если archinstall не добавил)
-grep -q swapfile /etc/fstab || echo '/swap/swapfile none swap defaults 0 0' >> /etc/fstab
+**6.3 Unified kernel images — вручную, в `/boot` (XBOOTLDR), не в `/efi`**
+(без archinstall этот шаг никто за вас не сделает). Для **обоих** ядер
+откройте пресет в nano, **стерите всё содержимое файла (`Ctrl+K` много
+раз, либо выделить всё и удалить) и вставьте** вместо него — показано
+на примере `linux` (`/etc/mkinitcpio.d/linux.preset`); для `linux-lts`
+(`/etc/mkinitcpio.d/linux-lts.preset`) то же самое, но с `-lts` в
+именах файлов (`vmlinuz-linux-lts`, `arch-linux-lts.efi`,
+`arch-linux-lts-fallback.efi`):
 
+```bash
+nano /etc/mkinitcpio.d/linux.preset
+```
+```ini
+ALL_kver="/boot/vmlinuz-linux"
+ALL_microcode=(/boot/*-ucode.img)
+
+PRESETS=('default' 'fallback')
+
+#default_image="/boot/initramfs-linux.img"
+default_uki="/boot/EFI/Linux/arch-linux.efi"
+
+#fallback_image="/boot/initramfs-linux-fallback.img"
+fallback_uki="/boot/EFI/Linux/arch-linux-fallback.efi"
+fallback_options="-S autodetect"
+```
+Важно: путь `/boot/EFI/Linux/…`, а не стандартный для Arch
+`/efi/EFI/Linux/…` — UKI должны лежать на **XBOOTLDR**, не на ESP
+Windows (раздел 4 примонтировал его именно туда; systemd-boot сам
+находит образы что на ESP, что на XBOOTLDR в `EFI/Linux/`,
+Boot Loader Specification это и предусматривает).
+
+```bash
 mkinitcpio -P
+ls /boot/EFI/Linux/       # ⚠ должны появиться 4 файла: arch-linux(-fallback).efi, arch-linux-lts(-fallback).efi
+
+bootctl --esp-path=/efi --boot-path=/boot install
+cat > /efi/loader/loader.conf << 'EOF'
+default @saved
+timeout 3
+console-mode max
+editor no
+EOF
+
 bootctl status          # Windows Boot Manager должен быть в списке записей
 ```
 
-Если archinstall не справился с раздельными EFI и `/boot`, systemd-boot ставится вручную:
-```bash
-bootctl --esp-path=/efi --boot-path=/boot install
-```
-UKI собираются через `mkinitcpio -P`, если в `/etc/mkinitcpio.d/linux.preset` раскомментированы строки `default_uki=` / `fallback_uki=` с путём `/boot/EFI/Linux/…`.
+Если после перезагрузки клавиши яркости OLED не работают, добавьте в `/etc/kernel/cmdline` `i915.enable_dpcd_backlight=1` (или `xe.enable_dpcd_backlight=1`, если используется драйвер `xe`; проверить через `lspci -k | grep -A3 VGA`), пересоберите UKI (`mkinitcpio -P`) — старый образ в `/boot/EFI/Linux/` просто перезапишется тем же именем, перезапускать `bootctl install` не нужно.
 
-Если после перезагрузки клавиши яркости OLED не работают, добавьте в `/etc/kernel/cmdline` `i915.enable_dpcd_backlight=1` (или `xe.enable_dpcd_backlight=1`, если используется драйвер `xe`; проверить через `lspci -k | grep -A3 VGA`) и выполните `mkinitcpio -P`.
+```bash
+exit            # выйти из chroot
+swapoff /mnt/swap/swapfile
+umount -R /mnt
+reboot
+```
 
 ## 7. После первой загрузки
 
@@ -161,7 +225,7 @@ UKI собираются через `mkinitcpio -P`, если в `/etc/mkinitcpi
    sudo sbctl enroll-keys -m    # -m — оставить ключи Microsoft
    sudo sbctl sign-all -g       # UKI и systemd-boot; хук пакета будет подписывать при обновлениях
    ```
-   В BIOS: **Secure Boot → Enabled**. На этом ноутбуке защита и так была выключена (пункт 1.1) — включать обратно нечего. Если вы ставили систему на машине, где протекторы действительно были и вы их приостанавливали (`-disable ... -RebootCount 3`), после входа в Windows включите защиту обратно: `manage-bde -protectors -enable C:`.
+   В BIOS: **Secure Boot → Enabled**. На этом ноутбуке защита и так была выключена (раздел 1, пункт 1) — включать обратно нечего. Если вы ставили систему на машине, где протекторы действительно были и вы их приостанавливали (`-disable ... -RebootCount 3`), после входа в Windows включите защиту обратно: `manage-bde -protectors -enable C:`.
 2. **Разблокировка диска по TPM** (по желанию, чтобы не вводить пароль LUKS каждый раз):
    ```bash
    sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 --tpm2-with-pin=yes /dev/nvme0n1p6
