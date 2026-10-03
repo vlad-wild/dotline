@@ -1,0 +1,9 @@
+#%PAM-1.0
+# dotline — polkit admin prompts (pkexec, package installs, …).
+#
+# No session/password groups: polkit only ever does a one-shot credential
+# check, it never opens a session or lets you change a password, matching
+# the polkit package's own minimal default here (which this replaces).
+auth       sufficient   pam_exec.so quiet /usr/bin/faceauth-auth
+auth       required     pam_unix.so try_first_pass
+account    include      system-login

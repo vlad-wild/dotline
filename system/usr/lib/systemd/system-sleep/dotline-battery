@@ -1,0 +1,19 @@
+#!/bin/sh
+# dotline: reapply the saved ASUS charge limit after resume (see
+# scripts/battery, docs/battery.md). systemd's system-sleep
+# contract (confirmed from systemd-sleep(8), not guessed): installed here
+# verbatim, must be executable (install.sh/update.sh special-case this
+# path to mode 0755 — every other system/ file is 0644), invoked with
+# $1=pre|post and $2=suspend|hibernate|... around every sleep/wake. Only
+# acts on "post" (after waking), and duplicates dotline-battery's reapply
+# logic rather than calling it: this hook has no idea where that git
+# checkout lives, it only knows its own installed path.
+[ "$1" = "post" ] || exit 0
+f=/etc/dotline/charge-limit
+[ -f "$f" ] || exit 0
+for p in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
+    if [ -e "$p" ]; then
+        cat "$f" >"$p" 2>/dev/null || true
+        break
+    fi
+done

@@ -1,0 +1,16 @@
+# dotline — reapplies the saved ASUS charge limit at boot (see
+# scripts/battery and docs/battery.md). The sysfs attribute itself
+# resets to the firmware default on every boot, so this has to run again
+# every time, not just once at install. Inlines the reapply logic instead
+# of calling back into the git checkout — a system service shouldn't
+# depend on where some user's repo happens to live (see scripts/battery's
+# own `reapply` for the same logic, kept for interactive use).
+[Unit]
+Description=dotline: reapply saved battery charge limit
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'f=/etc/dotline/charge-limit; [ -f "$f" ] || exit 0; for p in /sys/class/power_supply/BAT*/charge_control_end_threshold; do [ -e "$p" ] && { cat "$f" >"$p" 2>/dev/null || true; break; }; done'
+
+[Install]
+WantedBy=multi-user.target

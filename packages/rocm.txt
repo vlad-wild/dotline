@@ -1,0 +1,5 @@
+# --with-rocm: compute / local LLMs on the RX 7900 GRE (gfx1100, officially supported).
+rocm-hip-sdk
+rocminfo
+python-pytorch-rocm
+ollama-rocm

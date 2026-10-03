@@ -1,0 +1,8 @@
+# --with-egpu: AMD RX 7900 GRE over Thunderbolt 4 (needs multilib, see
+# enable_multilib() in install.sh — also pulled in by default by
+# packages/gaming.txt, so this list only adds what's actually
+# eGPU/AMD-specific).
+vulkan-radeon
+lib32-mesa
+lib32-vulkan-radeon
+switcheroo-control

@@ -1,0 +1,19 @@
+# ASUS Zenbook 14 UX3405CA: Core Ultra 9 285H, Arc 140T, NPU, IR camera.
+
+intel-ucode
+linux-firmware
+sof-firmware
+mesa
+vulkan-intel
+intel-media-driver
+intel-npu-driver           # NPU for faceauth / camera effects (OpenVINO)
+openvino
+power-profiles-daemon
+upower
+brightnessctl
+acpi
+v4l-utils
+linux-enable-ir-emitter    # if the IR emitter stays dark (faceauth docs)
+wlsunset                   # night light
+ddcutil                    # external monitor brightness
+solaar                     # Logitech MX Master 4 (swap for solaar-git if haptics are missing)

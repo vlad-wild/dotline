@@ -1,0 +1,12 @@
+# Everyday apps (see MIGRATION.md section 6). Remove what you do not need.
+firefox
+brave-bin
+thunderbird
+telegram-desktop
+mission-center
+loupe
+vlc
+qbittorrent
+localsend-bin
+onlyoffice-bin
+7zip

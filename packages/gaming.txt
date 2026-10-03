@@ -1,0 +1,9 @@
+# Gaming — installed by default, does NOT need the eGPU: the built-in
+# Arc 140T runs Steam/Proton fine on its own. Needs multilib (see
+# enable_multilib() in install.sh) for the lib32-* packages.
+lib32-vulkan-intel
+gamemode
+lib32-gamemode
+mangohud
+gamescope
+steam

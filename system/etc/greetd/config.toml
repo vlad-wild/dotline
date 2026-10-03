@@ -1,0 +1,19 @@
+# dotline — greetd, the login manager at boot.
+#
+# niri runs niri-greeter.kdl (bare: no bar, just enough to type a
+# password), which spawns the real graphical greeter — a self-contained
+# Quickshell config at /etc/dotline/greeter (system/etc/
+# dotline/greeter/shell.qml), loaded by absolute path (`qs -p`) so it
+# doesn't depend on the `greeter` system user's home directory at all.
+# Self-contained, not the usual ~/.config/quickshell/dotline/, because the
+# `greeter` user can't read the real user's home to pull in Theme.qml and
+# friends — see that file's own comment.
+#
+# See docs/install-arch.md for the `greeter` system user/group (created by
+# the greetd package) and system/etc/pam.d/greetd for the PAM side.
+[terminal]
+vt = 1
+
+[default_session]
+command = "niri -c /etc/greetd/niri-greeter.kdl"
+user = "greeter"

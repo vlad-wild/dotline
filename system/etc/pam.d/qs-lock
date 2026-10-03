@@ -1,0 +1,13 @@
+#%PAM-1.0
+# dotline — lock screen password fallback.
+#
+# Deliberately NO pam_exec faceauth-auth line here: face recognition for the
+# lock screen does not go through PAM at all. It talks to faceauthd directly
+# over its socket (services/FaceAuth.qml), in parallel with this password
+# check — either one unlocking wins. Stacking faceauth-auth on this file too
+# would mean the lock screen asks the camera for a second, separate attempt
+# on top of the one FaceAuth.qml already runs, for no benefit.
+auth       required     pam_unix.so try_first_pass
+account    include      system-login
+password   include      system-login
+session    include      system-login

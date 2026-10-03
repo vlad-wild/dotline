@@ -1,0 +1,10 @@
+networkmanager
+network-manager-applet     # nm-connection-editor for 802.1X and advanced settings
+networkmanager-openvpn
+wireguard-tools
+bluez
+bluez-utils
+bolt                       # Thunderbolt authorization (eGPU)
+kdeconnect                 # phone integration (docs/phone.md); kdeconnectd is
+                           # spawned by niri (no XDG autostart under a plain
+                           # compositor), ports opened by install.sh's firewall()

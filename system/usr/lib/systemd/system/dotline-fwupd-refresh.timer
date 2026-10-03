@@ -1,0 +1,13 @@
+# dotline — weekly trigger for dotline-fwupd-refresh.service.
+# Persistent=true catches up on boot if the laptop was off/asleep through
+# the scheduled time (it usually will be — this is a laptop, not a server).
+[Unit]
+Description=dotline: weekly fwupd metadata refresh
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

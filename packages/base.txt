@@ -1,0 +1,17 @@
+# Needed by the install scripts themselves and by every other group.
+base-devel
+git
+jq
+stow
+rsync
+curl
+pacman-contrib      # checkupdates
+reflector
+man-db
+btrfs-progs
+snapper
+snap-pac            # snapshot before/after every pacman transaction
+sbctl               # Secure Boot keys (docs/install-arch.md, step 7)
+fwupd               # BIOS / SSD / Thunderbolt firmware
+cryptsetup          # scripts/migrate: open the BitLocker Windows partition
+ntfs-3g             # scripts/migrate: NTFS fallback if the in-kernel ntfs3 driver can't mount it

@@ -1,0 +1,78 @@
+# niri + Quickshell desktop in the Nothing style.
+
+# compositor and session
+niri
+xwayland-satellite
+xdg-desktop-portal-gnome   # screencast / screenshots for niri
+xdg-desktop-portal-gtk     # file chooser
+gnome-network-displays     # cast the screen to a TV — Miracast + Chromecast (docs/screencast.md), AUR
+greetd
+polkit
+gnome-keyring
+xdg-user-dirs
+xdg-utils
+
+# shell (bar, widgets, lock screen, launcher, settings)
+quickshell
+qt6-5compat
+qt6-imageformats
+qt6-svg
+qt6-multimedia
+python-gobject             # D-Bus helpers (phone, network)
+python                     # scripts/palette-post (explicit: not just a python-gobject dep)
+
+# wallpaper and colours
+awww
+matugen
+imagemagick
+libnotify                  # notify-send — battery warnings (services/Status.qml)
+
+# terminal and command line
+kitty
+fish
+starship
+fastfetch
+yazi
+neovim
+btop
+fd
+ripgrep
+fzf
+plocate
+
+# clipboard, screenshots, OCR/QR, recording
+wl-clipboard
+cliphist
+grim
+slurp
+wf-recorder
+tesseract
+tesseract-data-rus
+tesseract-data-eng
+zbar
+qrencode
+libqalculate               # launcher calculator (qalc)
+niri-float-sticky           # pin a floating window across workspaces (AUR; niri has no native sticky-window concept — niri-wm/niri#932)
+
+# audio and media
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+playerctl
+cava
+
+# looks
+qt6ct
+kvantum
+adw-gtk-theme
+bibata-cursor-theme-bin
+papirus-icon-theme
+nwg-look
+
+# fonts (Matrix Sans is installed by install.sh from its GitHub release)
+noto-fonts
+noto-fonts-cjk
+noto-fonts-emoji
+ttf-jetbrains-mono-nerd
+otf-space-grotesk

@@ -1,0 +1,17 @@
+#%PAM-1.0
+# dotline — login at boot, driven by greetd.
+#
+# A real login session (unlike polkit-1/qs-lock above), so this needs the
+# full stack including session management (pam_systemd etc. via
+# system-login) — skipping it would break XDG_RUNTIME_DIR/logind setup for
+# the graphical session.
+#
+# Known limitation: logging in by face here does NOT unlock gnome-keyring —
+# only a successful pam_unix password step does (that's what feeds the
+# keyring your login password to decrypt it with). Typing the password once
+# after a face login unlocks it. See docs/install-arch.md.
+auth       sufficient   pam_exec.so quiet /usr/bin/faceauth-auth
+auth       required     pam_unix.so
+account    include      system-login
+password   include      system-login
+session    include      system-login

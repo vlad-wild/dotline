@@ -1,0 +1,18 @@
+# dotline — weekly metadata refresh for the update counter (see
+# scripts/update-check and docs/updates.md). Only refreshes fwupd's own
+# metadata cache so `fwupdmgr get-updates --json` has something current to
+# report; it never installs anything — actually applying firmware updates
+# stays a manual, on-AC-power step via `update.sh --firmware` (see
+# update.sh's own firmware()), same as the plan asked for.
+#
+# Runs as root via a system (not user) timer, not the plan's literal
+# wording of "user timer": `fwupdmgr refresh` needs polkit's
+# org.freedesktop.fwupd.network-access action, which isn't reliably
+# auth_admin_keep out of the box — a user timer could sit there prompting
+# for a password with no one at the keyboard. Root has no such prompt.
+[Unit]
+Description=dotline: refresh fwupd metadata cache
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/fwupdmgr refresh --force

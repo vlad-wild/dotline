@@ -1,0 +1,6 @@
+# Everything here runs on Linux: keep LF even when edited on Windows.
+* text=auto eol=lf
+*.jpg binary
+*.png binary
+*.ttf binary
+*.woff2 binary

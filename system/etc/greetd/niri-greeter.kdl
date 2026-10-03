@@ -1,0 +1,19 @@
+// dotline — minimal niri config for the greeter session (greetd runs
+// this as the `greeter` system user, see system/etc/greetd/config.toml).
+// Deliberately bare: no bar, no launcher, no binds beyond what's needed to
+// type a username/password — this isn't a desktop session, just a frame
+// for the login screen.
+input {
+    keyboard {
+        xkb {
+            layout "us,ru"
+            options "grp:win_space_toggle"
+        }
+    }
+}
+
+layout {
+    gaps 0
+}
+
+spawn-at-startup "qs" "-p" "/etc/dotline/greeter"

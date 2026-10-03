@@ -1,0 +1,7 @@
+# --with-calendar: CalDAV/VTODO sync. Opt-in, not installed by default —
+# needs the user's own account details (server URL, login) in
+# ~/.config/vdirsyncer/config before any of this does anything; see
+# docs/calendar.md for what to fill in and why this repo can't do it for you.
+vdirsyncer
+khal
+todoman
