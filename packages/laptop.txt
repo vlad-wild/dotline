@@ -13,6 +13,10 @@ upower
 brightnessctl
 acpi
 v4l-utils
+opencv                     # build dep of linux-enable-ir-emitter below — its AUR
+                           # PKGBUILD needs opencv4.pc at build time but doesn't
+                           # declare it, so paru won't auto-pull it; found failing
+                           # ("Dependency opencv4 not found") on a real install
 linux-enable-ir-emitter    # if the IR emitter stays dark (faceauth docs)
 wlsunset                   # night light
 ddcutil                    # external monitor brightness
